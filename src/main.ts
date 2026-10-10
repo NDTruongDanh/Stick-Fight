@@ -1,5 +1,5 @@
 import './styles.css';
-import { Ui, normalizeWsUrl } from './ui/screens.js';
+import { Ui, getWinsTarget, normalizeWsUrl } from './ui/screens.js';
 import type { HudState } from './ui/hud.js';
 import { PLAYER_COLORS } from '../shared/constants.js';
 
@@ -79,7 +79,7 @@ async function startLocal(humans: number, bots: boolean): Promise<void> {
     const { LocalMode } = await import('./modes/LocalMode.js');
     const total = Math.min(4, Math.max(1, humans + (bots ? 1 : 0)));
     const botCount = Math.max(total - Math.min(humans, 2), bots ? 1 : 0);
-    const m = new LocalMode(canvas, { humans: Math.min(humans, 4), bots: botCount }) as Mode;
+    const m = new LocalMode(canvas, { humans: Math.min(humans, 4), bots: botCount, winsTarget: getWinsTarget() }) as Mode;
     mode = m;
     if (m.onQuit !== undefined) m.onQuit = showMenu;
     ui.showHud(() => m.getHudState?.() ?? { players: [], round: 1, levelName: '' });

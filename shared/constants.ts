@@ -14,5 +14,19 @@ export const MAX_PLAYERS = 4;
 export const PLAYER_HP = 100;
 export const WIN_SCORE_DEFAULT = 5;
 
+// Boss / juggernaut round tuning (every 5th round).
+export const BOSS_ROUND_EVERY = 5;
+export const BOSS_HP = 300;
+export const BOSS_SCALE = 1.8;
+export const BOSS_SPEED_MULT = 0.85;
+export const BOSS_DAMAGE_TAKEN_MULT = 0.5;
+export const BOSS_KNOCKBACK_TAKEN_MULT = 0.4;
+export const BOSS_MELEE_MULT = 2;
+export const BOSS_STOMP_RADIUS = 120;
+export const BOSS_STOMP_DAMAGE = 25;
+export const BOSS_STOMP_KNOCKBACK = 700;
+export const BOSS_STOMP_COOLDOWN = 1.5;
+export const BOSS_SURVIVE_TIME = 45;
+
 export const PLAYER_COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#eab308'];
 export const PLAYER_NAMES = ['RED', 'BLUE', 'GREEN', 'YELLOW'];

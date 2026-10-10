@@ -132,4 +132,60 @@ export const LEVELS: LevelDef[] = [
     spawns: [[0.08, 0.8], [0.92, 0.8], [0.12, 0.54], [0.88, 0.54]],
     weaponDrops: [[0.46, 0.24], [0.5, 0.44]],
   },
+  {
+    id: 'castle10', name: 'Chain Hold', theme: 'castle',
+    platforms: [
+      { x: 0, y: 0.9, w: 0.42, h: 0.1 },
+      { x: 0.58, y: 0.9, w: 0.42, h: 0.1 },
+      // Destructible-look chains: blink platforms with a long period.
+      { x: 0.28, y: 0.64, w: 0.15, h: 0.035, type: 'blink', period: 7, duty: 0.65, phase: 0 },
+      { x: 0.57, y: 0.64, w: 0.15, h: 0.035, type: 'blink', period: 7, duty: 0.65, phase: 3.5 },
+      { x: 0.42, y: 0.38, w: 0.16, h: 0.035 },
+    ],
+    movers: [
+      // Swinging spike-ball visual (x-axis pendulum look).
+      { x: 0.47, y: 0.5, w: 0.06, h: 0.035, axis: 'x', range: 0.14, period: 3 },
+    ],
+    killRects: [
+      // Spike-ball kill zone at the pendulum's rest position (static zone;
+      // the mover above provides the swinging visual).
+      { x: 0.47, y: 0.545, w: 0.06, h: 0.05, kind: 'spikes' },
+    ],
+    spawns: [[0.08, 0.8], [0.92, 0.8], [0.46, 0.28], [0.54, 0.28]],
+    weaponDrops: [[0.4, 0.32], [0.55, 0.58]],
+  },
+  {
+    id: 'factory9', name: 'Rooftop', theme: 'factory',
+    platforms: [
+      { x: 0, y: 0.9, w: 0.46, h: 0.1 },
+      { x: 0.54, y: 0.9, w: 0.46, h: 0.1 },
+      // Roof platform where falling drops land (reachable via the side lifts).
+      { x: 0.22, y: 0.52, w: 0.56, h: 0.05 },
+    ],
+    movers: [
+      { x: 0.04, y: 0.55, w: 0.1, h: 0.035, axis: 'y', range: 0.18, period: 4 },
+      { x: 0.86, y: 0.55, w: 0.1, h: 0.035, axis: 'y', range: 0.18, period: 4, phase: 2 },
+    ],
+    spawns: [[0.08, 0.8], [0.92, 0.8], [0.3, 0.42], [0.7, 0.42]],
+    weaponDrops: [[0.35, 0.4], [0.65, 0.4]],
+  },
+  {
+    id: 'western11', name: 'Chandelier', theme: 'western',
+    platforms: [
+      { x: 0, y: 0.9, w: 1, h: 0.1 },
+      { x: 0.06, y: 0.62, w: 0.18, h: 0.035 },
+      { x: 0.76, y: 0.62, w: 0.18, h: 0.035 },
+      { x: 0.4, y: 0.4, w: 0.2, h: 0.035 },
+    ],
+    crates: [
+      { x: 0.44, y: 0.83, w: 0.05, h: 0.07 },
+      { x: 0.51, y: 0.83, w: 0.05, h: 0.07 },
+      { x: 0.475, y: 0.76, w: 0.05, h: 0.07 },
+    ],
+    barrels: [
+      { x: 0.36, y: 0.82 }, { x: 0.64, y: 0.82 },
+    ],
+    spawns: [[0.08, 0.8], [0.92, 0.8], [0.12, 0.52], [0.88, 0.52]],
+    weaponDrops: [[0.46, 0.34], [0.5, 0.7]],
+  },
 ];

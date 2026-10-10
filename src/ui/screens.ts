@@ -1,10 +1,38 @@
 import { renderHud, type HudState } from './hud.js';
+import { LEVELS } from '../levels/levels.js';
 
 export interface MenuHandlers {
   onLocal(n: number, bots: boolean): void;
   onHost(): void;
   onJoin(): void;
   onHow(): void;
+}
+
+// Match config: wins target stepper (3/5/10, default 5) persisted to localStorage.
+// NOTE: display-only for now. LocalMode's constructor only accepts
+// `{ humans, bots }` (src/modes/LocalMode.ts, owned by another workstream),
+// so the engine still plays first-to-WIN_SCORE_DEFAULT (5). Once LocalMode
+// accepts an optional `winsTarget`, read getWinsTarget() in main.ts and pass
+// it through — no UI changes needed.
+export const WINS_OPTIONS = [3, 5, 10] as const;
+const WINS_KEY = 'sf_wins';
+
+export function getWinsTarget(): number {
+  try {
+    const v = Number(localStorage.getItem(WINS_KEY));
+    if (v === 3 || v === 5 || v === 10) return v;
+  } catch {
+    /* headless/ssr — fall through to default */
+  }
+  return 5;
+}
+
+export function setWinsTarget(v: number): void {
+  try {
+    localStorage.setItem(WINS_KEY, String(v));
+  } catch {
+    /* storage unavailable — ignore */
+  }
 }
 
 export interface SetupData {
@@ -130,6 +158,38 @@ function wireBotToggle(root: HTMLElement, state: { bots: boolean }): void {
   };
 }
 
+function winsHTML(cur: number): string {
+  const btns = WINS_OPTIONS.map(
+    (v) =>
+      `<button data-wins="${v}" class="px-3 py-1.5 rounded-md font-bold text-sm border ${
+        v === cur ? 'bg-yellow-500 border-yellow-700 text-black' : 'bg-neutral-700 border-neutral-900 text-neutral-200'
+      }">${v}</button>`,
+  ).join('');
+  return `<div class="flex items-center justify-between gap-3">
+    <span class="text-sm text-neutral-300">Round wins to take match</span>
+    <div class="flex items-center gap-1.5">${btns}</div></div>`;
+}
+
+function wireWins(root: HTMLElement, state: { wins: number }): void {
+  const paint = () => {
+    root.querySelectorAll<HTMLButtonElement>('[data-wins]').forEach((x) => {
+      const on = Number(x.dataset.wins) === state.wins;
+      x.className = `px-3 py-1.5 rounded-md font-bold text-sm border ${
+        on ? 'bg-yellow-500 border-yellow-700 text-black' : 'bg-neutral-700 border-neutral-900 text-neutral-200'
+      }`;
+    });
+    const note = root.querySelector('[data-wins-note]');
+    if (note) note.textContent = `first to ${state.wins} wins takes the match`;
+  };
+  root.querySelectorAll<HTMLButtonElement>('[data-wins]').forEach((b) => {
+    b.onclick = () => {
+      state.wins = Number(b.dataset.wins);
+      setWinsTarget(state.wins);
+      paint();
+    };
+  });
+}
+
 const CONTROLS: [string, string][] = [
   ['A / D or ← / →', 'Move'],
   ['W or ↑', 'Jump'],
@@ -152,7 +212,7 @@ function footerHTML(): string {
     host = '';
   }
   const ipHint = host ? ` · LAN: friends join <span class="font-mono text-green-300">ws://${esc(host)}:8080</span>` : '';
-  return `<p class="text-center text-[11px] text-neutral-500 mt-4">clone for LAN parties · first to 5 wins takes the match${ipHint}</p>
+  return `<p class="text-center text-[11px] text-neutral-500 mt-4">clone for LAN parties · <span data-wins-note>first to ${getWinsTarget()} wins takes the match</span>${ipHint}</p>
     <p class="text-center text-[11px] text-neutral-600 mt-1">press <span class="font-mono text-neutral-400">H</span> in-game to toggle this help</p>`;
 }
 
@@ -193,11 +253,13 @@ export class Ui {
   }
 
   showMenu(cb: MenuHandlers): void {
-    const state = { humans: 2, bots: true };
+    const state = { humans: 2, bots: true, wins: getWinsTarget() };
     this.shell(`${title('a clone for LAN parties')}
+      <p class="text-center text-[12px] text-neutral-400 -mt-2 mb-1">${LEVELS.length} rotating arenas · random every round</p>
       <div class="flex flex-col gap-2.5 my-4">
         ${stepperHTML('humans', 'Local humans (rest become bots)', 1, 4, state.humans)}
         ${botToggleHTML(state.bots)}
+        ${winsHTML(state.wins)}
       </div>
       <div class="flex flex-col gap-2.5">
         <button id="m-local" class="${BTN_RED}">LOCAL FIGHT</button>
@@ -210,6 +272,7 @@ export class Ui {
       ${footerHTML()}`);
     wireSteppers(this.screen, state, 1, 4);
     wireBotToggle(this.screen, state as { bots: boolean });
+    wireWins(this.screen, state as { wins: number });
     const q = (s: string) => this.screen.querySelector<HTMLButtonElement>(s);
     (q('#m-local') as HTMLButtonElement).onclick = () => cb.onLocal(state.humans, state.bots);
     (q('#m-host') as HTMLButtonElement).onclick = () => cb.onHost();
@@ -315,7 +378,7 @@ export class Ui {
     this.shell(
       `${title('')}
       <table class="w-full mb-4"><tbody>${rows}</tbody></table>
-      <p class="text-[12px] text-neutral-400 mb-4">Grab falling weapons, knock your friends off the stage, and don't stand in lava. First to 5 round wins takes the match.</p>
+      <p class="text-[12px] text-neutral-400 mb-4">Grab falling weapons, knock your friends off the stage, and don't stand in lava. First to ${getWinsTarget()} round wins takes the match.</p>
       <button id="h-back" class="${BTN_YELLOW} w-full">BACK</button>
       ${footerHTML()}`,
       true,
@@ -326,7 +389,7 @@ export class Ui {
   /** Pause menu overlay with resume / restart / quit. */
   showPause(cb: { onResume(): void; onRestart(): void; onQuit(): void }): void {
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-1">PAUSED</h2>
-      <p class="text-center text-neutral-400 text-sm mb-4">take a breath — first to 5 takes the match</p>
+      <p class="text-center text-neutral-400 text-sm mb-4">take a breath — first to ${getWinsTarget()} takes the match</p>
       <div class="flex flex-col gap-2.5">
         <button id="p-resume" class="${BTN_GREEN}">RESUME (Esc)</button>
         <button id="p-restart" class="${BTN_YELLOW}">RESTART (R)</button>

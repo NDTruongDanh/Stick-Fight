@@ -26,12 +26,13 @@ function lanIPs(): { addr: string; internal: boolean }[] {
 
 const port = Number(arg("port", String(DEFAULT_PORT))) || DEFAULT_PORT;
 const levelId = arg("level", "woods1");
+const winsTarget = Number(arg("wins", "5")) || 5;
 
-const server = new HostServer(port, levelId);
+const server = new HostServer(port, levelId, winsTarget);
 server.start();
 
 console.log("=== Stick Fight LAN host ===");
-console.log(`level: ${levelId}`);
+console.log(`level: ${levelId} · first to ${winsTarget}`);
 for (const { addr, internal } of lanIPs()) {
   console.log(`  ws://${addr}:${port}${internal ? "  (this machine)" : "  <-- give this to friends"}`);
 }

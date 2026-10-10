@@ -37,9 +37,10 @@ export class HostServer {
   constructor(
     private port: number,
     private levelId: string,
+    private winsTarget = 5,
   ) {
     const level = LEVELS.find((l) => l.id === levelId) ?? LEVELS[0];
-    this.match = new Match(level, { cycle: [...LEVELS] });
+    this.match = new Match(level, { cycle: [...LEVELS], winsTarget: this.winsTarget });
   }
 
   start(): void {
