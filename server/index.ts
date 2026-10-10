@@ -62,7 +62,7 @@ if (customLevel) {
   console.log(`custom level: ${customLevel.name || levelFile}`);
 }
 console.log(`level: ${customLevel ? customLevel.id : levelId} · first to ${winsTarget} · bots: ${botCount}`);
-console.log("lobby: players type /ready (auto-starts when all 2+ ready, else 3s timer)");
+console.log("lobby: match starts when all 2+ players are /ready (host: /start to force)");
 console.log("host (first player) chat commands: /start · /restart · /kick <name> · /bots <0-4>");
 for (const { addr, internal } of lanIPs()) {
   console.log(`  ws://${addr}:${port}${internal ? "  (this machine)" : "  <-- give this to friends"}`);

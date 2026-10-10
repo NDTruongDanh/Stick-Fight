@@ -84,7 +84,15 @@ export class OnlineMode {
   private prevThrow = false;
   private feed: string[] = [];
   private roster: RosterPlayer[] = [];
+  /** Waiting-lobby hooks wired by main.ts: live roster, match-start, fatal close. */
+  onLobbyRoster: (players: RosterPlayer[]) => void = () => {};
+  onLobbyStart: () => void = () => {};
+  onLobbyClose: (err: string | null) => void = () => {};
   private lastFrame = 0;
+  private closed = false;
+  private gameBooted = false;
+  /** Guard so onLobbyStart fires exactly once per start(). */
+  private lobbyStartFired = false;
   private sfx = new Sfx();
   private shake = 0;
   private parts: Particle[] = [];
@@ -104,8 +112,58 @@ export class OnlineMode {
     this.ctx = ctx;
   }
 
+  /** True once the server has started the match (start msg or first snapshot). */
+  get hasStarted(): boolean {
+    return this.started;
+  }
+
+  get lobbyRoster(): RosterPlayer[] {
+    return this.roster;
+  }
+
+  get myId(): number {
+    return this.net.clientId;
+  }
+
+  /** FIGHT! from the waiting lobby: host force-starts, others toggle ready. */
+  lobbyFight(): void {
+    const me = this.roster.find((p) => p.id === this.net.clientId);
+    if (me && (me as { slot?: number }).slot === 0) {
+      this.hostStart();
+    } else {
+      this.toggleReady();
+    }
+  }
+
+  /** Host-only: ask the server to start the match (/start). */
+  hostStart(): void {
+    this.net.sendChat("/start");
+  }
+
+  /** Toggle /ready ↔ /unready based on our current roster flag. */
+  toggleReady(): void {
+    const me = this.roster.find((p) => p.id === this.net.clientId);
+    this.net.sendChat(me?.ready ? "/unready" : "/ready");
+  }
+
+  private fireLobbyStart(): void {
+    if (this.lobbyStartFired) return;
+    this.lobbyStartFired = true;
+    try {
+      this.onLobbyStart();
+    } catch {
+      /* listener error — game loop still runs */
+    }
+  }
+
   async start(): Promise<void> {
-    this.sizeCanvas();
+    // Lobby-first: connect + stay in the DOM lobby menu. The arena map is
+    // NOT loaded and nothing spawns until the server starts the match —
+    // game boot (level resolve + render/input loop) happens in beginGame(),
+    // triggered by the start message or the first snapshot.
+    this.closed = false;
+    this.gameBooted = false;
+    this.lobbyStartFired = false;
     this.sfx.ensure();
     window.addEventListener("resize", this.onResize);
     window.addEventListener("keydown", this.onKeyDown);
@@ -115,17 +173,10 @@ export class OnlineMode {
     window.addEventListener("mouseup", this.onMouseUp);
     this.canvas.addEventListener("contextmenu", this.onCtxMenu);
 
-    await this.net.connect(this.url, this.name);
-    if (this.net.customLevel && this.applyCustomLevel(this.net.customLevel)) {
-      this.banner = `${this.level.name} · CUSTOM`;
-      this.bannerT = 2;
-    } else {
-      this.level = await resolveLevel(this.net.levelId || FALLBACK_LEVEL.id);
-    }
-
+    // Wire handlers BEFORE connect so the welcome-adjacent roster broadcast
+    // (sent in the same server tick) is never missed.
     this.net.onSnapshot = (s) => this.onSnapshot(s);
     this.net.onStart = (s) => {
-      this.started = true;
       if (s.levelJson && this.applyCustomLevel(s.levelJson)) {
         this.banner = `${this.level.name} · CUSTOM — ROUND 1`;
         this.bannerT = 2;
@@ -135,9 +186,16 @@ export class OnlineMode {
         });
       }
       this.pushFeed("match started!");
+      this.beginGame();
+      this.fireLobbyStart();
     };
     this.net.onRoster = (r) => {
       this.roster = r.players as RosterPlayer[];
+      try {
+        this.onLobbyRoster(this.roster);
+      } catch {
+        /* listener error — roster still cached */
+      }
     };
     this.net.onChat = (c) => this.pushFeed(`${c.from}: ${c.text}`);
     this.net.onClose = () => {
@@ -146,6 +204,13 @@ export class OnlineMode {
       // via the existing feed path instead of the generic retry line.
       if (err && /kick|full|version|exhausted/i.test(err)) {
         this.pushFeed(err);
+        if (!this.started) {
+          try {
+            this.onLobbyClose(err);
+          } catch {
+            /* ignore listener errors */
+          }
+        }
       } else {
         // Auto-reconnect (up to 5x, backoff) is handled inside NetClient.
         this.pushFeed("connection lost — retrying…");
@@ -159,6 +224,30 @@ export class OnlineMode {
       this.pushFeed(best ? `match won by #${best[0]} (${best[1]})` : "match over");
     };
 
+    await this.net.connect(this.url, this.name);
+    // Lobby hold: return after connect. No level resolve, no canvas sizing,
+    // no input/render loop — the caller keeps the DOM lobby menu up until
+    // onLobbyStart fires, at which point beginGame() has already booted.
+  }
+
+  /**
+   * Boot the arena + render/input loop. Runs once, on match start
+   * (start message or first snapshot). Safe to call from either path —
+   * the second call is a no-op. Never boots after stop().
+   */
+  private beginGame(): void {
+    if (this.gameBooted || this.closed) return;
+    this.gameBooted = true;
+    this.started = true;
+    if (!this.net.customLevel || !this.applyCustomLevel(this.net.customLevel)) {
+      void resolveLevel(this.net.levelId || FALLBACK_LEVEL.id).then((lv) => {
+        this.level = lv;
+      });
+    } else {
+      this.banner = `${this.level.name} · CUSTOM`;
+      this.bannerT = 2;
+    }
+    this.sizeCanvas();
     this.running = true;
     this.lastFrame = performance.now();
     this.sendTimer = setInterval(() => this.sendInput(), 1000 / 30);
@@ -171,6 +260,7 @@ export class OnlineMode {
   }
 
   stop(): void {
+    this.closed = true;
     this.running = false;
     cancelAnimationFrame(this.raf);
     if (this.sendTimer) {
@@ -301,6 +391,12 @@ export class OnlineMode {
   // ---- snapshots / prediction ----
 
   private onSnapshot(s: SnapshotMsg): void {
+    // Snapshots only stream after the server starts the match, so the first
+    // one doubles as a start signal (covers late joins that missed `start`).
+    // Boot the arena first so spawning/level-load never happens in the lobby.
+    if (!this.gameBooted) this.beginGame();
+    this.fireLobbyStart();
+    this.started = true;
     // Surface server killfeed / round flow (causes ride in [brackets]).
     for (const e of s.events ?? []) {
       if (e.kind === "kill" || e.kind === "death") {

@@ -118,6 +118,14 @@ export class HostServer {
    */
   private pumpSim(dt: number): void {
     const now = Date.now();
+    // Lobby phase: hold the sim frozen (no bot fights) until the match starts,
+    // so joiners see a waiting lobby instead of bots already fighting.
+    // Keep the wall-clock anchored so starting later doesn't replay backlog.
+    if (!this.started) {
+      this.lastTickWall = now;
+      this.tickAcc = 0;
+      return;
+    }
     let elapsed = now - this.lastTickWall;
     this.lastTickWall = now;
     if (!(elapsed >= 0)) elapsed = 0;
@@ -211,6 +219,9 @@ export class HostServer {
           this.broadcastRoster();
           this.chat("server", `${info.name} joined (${this.clients.size}/${MAX_PLAYERS})`);
           this.maybeAutoStart();
+          // Late join to a running match: catch the newcomer up so they skip
+          // the lobby and drop straight into the game.
+          if (this.started) this.sendStartTo(ws);
           break;
         }
         case "input":
@@ -276,14 +287,15 @@ export class HostServer {
   private broadcastRoster(): void {
     const slots = new Map<number, number>();
     for (const c of this.clients.values()) slots.set(c.id, c.slot);
-    // `ready` is an additive optional flag: old clients ignore unknown JSON
-    // fields, new clients read it via an optional cast. No version bump.
-    const players: { id: number; name: string; slot: number; bot: boolean; ready?: boolean }[] =
+    // `ready`/`color` are additive optional flags: old clients ignore unknown
+    // JSON fields, new clients read them via an optional cast. No version bump.
+    const players: { id: number; name: string; slot: number; bot: boolean; color?: string; ready?: boolean }[] =
       this.match.players.map((p, i) => ({
         id: p.id,
         name: p.name,
         slot: slots.get(p.id) ?? i,
         bot: !!p.isBot,
+        color: p.color,
         ready: p.isBot ? true : (this.clients.get(p.id)?.ready ?? false),
       }));
     const msg = { v: PROTOCOL_VERSION, t: "roster", players } as unknown as ServerMsg;
@@ -465,12 +477,11 @@ export class HostServer {
   }
 
   private maybeAutoStart(): void {
-    if (this.started || this.humans() < 2 || this.startTimer) return;
-    this.chat("server", "lobby: type /ready (host: /start) — starting in 3s…");
-    this.startTimer = setTimeout(() => {
-      this.startTimer = null;
-      if (!this.started && this.humans() >= 2) this.startMatch(false);
-    }, 3000);
+    // Ready-gated lobby: the match ONLY starts when every connected human
+    // (min 2) is /ready, or when the host force-starts with /start.
+    // No timed auto-start — joining always lands in the lobby menu first.
+    if (this.started || this.humans() < 2) return;
+    this.chat("server", "lobby: type /ready — starting when everyone is ready (host: /start to force)");
   }
 
   private startMatch(forced: boolean): void {
@@ -486,8 +497,18 @@ export class HostServer {
     this.chat("server", forced ? "match started by host" : "match started!");
   }
 
+  /** Single-client (re)start notice for late joins to a running match. */
+  private sendStartTo(ws: WebSocket): void {
+    const msg: ServerMsg = { v: PROTOCOL_VERSION, t: "start", levelId: this.match.level.id, seed: this.seed };
+    if (this.customJson) msg.levelJson = this.customJson;
+    send(ws, msg);
+  }
+
   private broadcastSnapshot(): void {
     if (!this.wss) return;
+    // Lobby phase: roster only — no snapshots, so joiners see a waiting
+    // lobby instead of bots already fighting.
+    if (!this.started) return;
     const events = this.match.drainEvents();
     // Surface matchEnd to clients as a dedicated message as well.
     for (const e of events) {

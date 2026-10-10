@@ -14,7 +14,7 @@ export interface SnapshotEvent { kind: string; text?: string; a?: number; b?: nu
 export type ServerMsg =
   | { v: number; t: 'welcome'; clientId: number; slot: number; levelId: string }
   | { v: number; t: 'reject'; reason: string }
-  | { v: number; t: 'roster'; players: { id: number; name: string; slot: number; bot: boolean }[] }
+  | { v: number; t: 'roster'; players: { id: number; name: string; slot: number; bot: boolean; color?: string; ready?: boolean }[] }
   | { v: number; t: 'start'; levelId: string; seed: number; levelJson?: string }
   | { v: number; t: 'snapshot'; tick: number; time: number; levelId: string; round: number; players: SnapshotPlayer[]; projectiles: ProjectileState[]; crates: CrateState[]; barrels: BarrelState[]; drops: DroppedGun[]; events: SnapshotEvent[]; levelJson?: string }
   | { v: number; t: 'pong'; t0: number }
