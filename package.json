@@ -1,0 +1,27 @@
+{
+  "name": "stick-fight-lan-clone",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Stick Fight: The Game clone - TypeScript + Canvas + Tailwind + LAN multiplayer",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host",
+    "host": "tsx server/index.ts --port 8080",
+    "host:dev": "tsx watch server/index.ts --port 8080",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.14",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3"
+  }
+}
