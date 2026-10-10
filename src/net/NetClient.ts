@@ -6,6 +6,8 @@ export type RosterMsg = Extract<ServerMsg, { t: "roster" }>;
 export type ChatMsg = Extract<ServerMsg, { t: "chat" }>;
 export type StartMsg = Extract<ServerMsg, { t: "start" }>;
 export type WelcomeMsg = Extract<ServerMsg, { t: "welcome" }>;
+/** Roster entry plus the additive optional `ready` flag the host broadcasts. */
+export type RosterPlayer = RosterMsg["players"][number] & { ready?: boolean };
 
 export interface InputPayload {
   seq: number;
@@ -39,9 +41,18 @@ export class NetClient {
   private ws: WebSocket | null = null;
   private url = "";
   private name = "";
+  /** Last connection failure (reject reason / error / drop). Null while connected. */
+  lastError: string | null = null;
+  /** Consecutive auto-reconnect attempts for the current outage. */
+  reconnectAttempts = 0;
+  /** Fires on each scheduled auto-reconnect with the 1-based attempt number. */
+  onReconnect: (attempt: number) => void = () => {};
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnected = false; // auto-reconnect once
+  private maxReconnectAttempts = 5;
+  private reconnectBaseMs = 1000;
+  /** Last close followed a server reject (full/kicked/version) — do not retry. */
+  private rejectFatal = false;
   private manualClose = false;
   private connectResolve: (() => void) | null = null;
   private connectReject: ((e: Error) => void) | null = null;
@@ -50,6 +61,9 @@ export class NetClient {
     this.url = url;
     this.name = name;
     this.manualClose = false;
+    this.lastError = null;
+    this.reconnectAttempts = 0;
+    this.rejectFatal = false;
     return new Promise<void>((resolve, reject) => {
       this.connectResolve = resolve;
       this.connectReject = reject;
@@ -60,6 +74,7 @@ export class NetClient {
           const rej = this.connectReject;
           this.connectResolve = null;
           this.connectReject = null;
+          this.lastError = "connect timeout (no welcome)";
           rej(new Error("connect timeout (no welcome)"));
         }
       }, 6000);
@@ -77,15 +92,36 @@ export class NetClient {
     ws.onmessage = (ev) => this.handle(String(ev.data));
     ws.onclose = () => {
       this.stopPing();
-      this.onClose();
-      // Auto-reconnect once (unless the user closed deliberately).
-      if (!this.manualClose && !this.reconnected) {
-        this.reconnected = true;
-        this.reconnectTimer = setTimeout(() => this.open(), 1000);
+      try {
+        this.onClose();
+      } catch {
+        /* listener error — still schedule reconnect below */
       }
+      // No retry after a deliberate close or a fatal reject (full/kicked/version).
+      if (this.manualClose || this.rejectFatal) {
+        this.rejectFatal = false;
+        if (!this.manualClose && !this.lastError) this.lastError = "disconnected";
+        return;
+      }
+      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        this.lastError = "connection lost (reconnects exhausted)";
+        return;
+      }
+      // Exponential backoff: 1s, 2s, 4s, … capped at 10s.
+      this.reconnectAttempts++;
+      const delay = Math.min(10000, this.reconnectBaseMs * 2 ** (this.reconnectAttempts - 1));
+      this.lastError = "connection lost — retrying…";
+      const attempt = this.reconnectAttempts;
+      try {
+        this.onReconnect(attempt);
+      } catch {
+        /* ignore listener errors */
+      }
+      this.reconnectTimer = setTimeout(() => this.open(), delay);
     };
     ws.onerror = () => {
       // Errors surface via onclose; if we never got welcome, reject connect().
+      if (this.clientId < 0) this.lastError = "websocket error";
       if (this.clientId < 0 && this.connectReject) {
         const rej = this.connectReject;
         this.connectResolve = null;
@@ -124,6 +160,23 @@ export class NetClient {
     this.ws = null;
   }
 
+  /**
+   * Manually (re)connect, resetting backoff state. Use after a fatal reject
+   * (e.g. kick) or exhausted auto-retries, e.g. from a retry button.
+   */
+  reconnect(): void {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+    this.manualClose = false;
+    this.rejectFatal = false;
+    this.reconnectAttempts = 0;
+    this.lastError = null;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.open();
+  }
+
   private startPing(): void {
     this.stopPing();
     this.pingTimer = setInterval(() => {
@@ -154,6 +207,8 @@ export class NetClient {
         this.clientId = msg.clientId;
         this.slot = msg.slot;
         this.levelId = msg.levelId;
+        this.lastError = null;
+        this.reconnectAttempts = 0;
         this.onWelcome(msg);
         if (this.connectResolve) {
           const res = this.connectResolve;
@@ -163,6 +218,9 @@ export class NetClient {
         }
         break;
       case "reject":
+        this.lastError = msg.reason;
+        // Fatal: the server refused us (full / kicked / version) — onclose must not retry.
+        this.rejectFatal = true;
         if (this.connectReject) {
           const rej = this.connectReject;
           this.connectResolve = null;

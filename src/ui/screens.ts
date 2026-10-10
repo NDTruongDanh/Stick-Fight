@@ -82,6 +82,8 @@ export interface LobbyPlayer {
   name: string;
   color: string;
   bot: boolean;
+  /** Ready flag from the host roster broadcast (undefined = old server). */
+  ready?: boolean;
 }
 
 export interface EditorHandlers {
@@ -108,6 +110,8 @@ export interface LobbyInfo {
   title: string;
   addr?: string;
   players: LobbyPlayer[];
+  /** Optional footer line (e.g. host chat commands). Rendered as plain text. */
+  hint?: string;
 }
 
 export interface LobbyHandlers {
@@ -236,6 +240,27 @@ function footerHTML(): string {
     <p class="text-center text-[11px] text-neutral-600 mt-1">press <span class="font-mono text-neutral-400">H</span> in-game to toggle this help</p>`;
 }
 
+function lobbyCountText(players: LobbyPlayer[]): string {
+  const humans = players.filter((p) => !p.bot);
+  const ready = humans.filter((p) => p.ready).length;
+  return `${players.length}/4 players · ${ready}/${humans.length} ready`;
+}
+
+function lobbyChipsHTML(players: LobbyPlayer[]): string {
+  return players
+    .map((p) => {
+      const badge = p.bot
+        ? `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-purple-700 text-purple-100">BOT</span>`
+        : p.ready
+          ? `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-green-700 text-green-100">READY ✓</span>`
+          : `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-neutral-700 text-neutral-300">WAITING</span>`;
+      return `<div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700">
+        <span class="w-4 h-4 rounded-full shrink-0" style="background:${p.color}"></span>
+        <span class="font-bold text-sm">${esc(p.name)}</span>${badge}</div>`;
+    })
+    .join('');
+}
+
 export class Ui {
   root: HTMLElement;
   private screen: HTMLElement;
@@ -326,7 +351,11 @@ export class Ui {
                  <input id="s-ip" class="${INPUT} mt-1 font-mono" placeholder="ws://${lanHint()}:8080" />
                  <span class="block text-[11px] text-neutral-500 mt-1">examples: <span class="font-mono text-neutral-300">ws://192.168.1.10:8080</span> · <span class="font-mono text-neutral-300">192.168.1.10:8080</span> · <span class="font-mono text-neutral-300">192.168.1.10</span> (port 8080)</span>
                  <span id="s-ip-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
-               </label>`
+               </label>
+                <div class="flex items-center gap-2">
+                  <button id="s-check" class="px-3 py-1.5 rounded-md bg-neutral-700 hover:bg-neutral-600 text-neutral-200 text-xs font-bold border border-neutral-900 cursor-pointer">CHECK PLAYERS</button>
+                  <span id="s-count" class="text-[12px] text-neutral-400"></span>
+                </div>`
             : ''
         }
         ${
@@ -344,7 +373,12 @@ export class Ui {
                  <input id="s-custom-file" type="file" accept=".json,application/json"
                    class="mt-2 block w-full text-[12px] text-neutral-400 file:mr-2 file:px-3 file:py-1 file:rounded file:border file:border-neutral-900 file:bg-neutral-700 file:text-neutral-100" />
                  <span id="s-custom-status" class="block mt-1 text-neutral-500"></span>
-               </div>`
+                </div>
+                <div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
+                  <span class="font-bold text-neutral-200">Lobby chat commands</span><br />
+                  <span class="text-neutral-400">Players: <span class="font-mono text-green-300">/ready</span> · <span class="font-mono text-green-300">/unready</span> — auto-starts when all 2+ are ready (else 3s timer).</span><br />
+                  <span class="text-neutral-400">Host (first player): <span class="font-mono text-green-300">/start</span> force-start · <span class="font-mono text-green-300">/restart</span> reset scores + round 1 · <span class="font-mono text-green-300">/kick &lt;name&gt;</span> · <span class="font-mono text-green-300">/bots &lt;n&gt;</span></span>
+                </div>`
             : ''
         }
         ${
@@ -422,31 +456,48 @@ export class Ui {
   }
 
   showLobby(info: LobbyInfo, cb: LobbyHandlers): void {
-    const chips = info.players
-      .map(
-        (p) => `<div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700">
-          <span class="w-4 h-4 rounded-full shrink-0" style="background:${p.color}"></span>
-          <span class="font-bold text-sm">${esc(p.name)}</span>
-          <span class="ml-auto text-[11px] px-2 py-0.5 rounded ${
-            p.bot ? 'bg-purple-700 text-purple-100' : 'bg-green-700 text-green-100'
-          }">${p.bot ? 'BOT' : 'HUMAN'}</span></div>`,
-      )
-      .join('');
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-1">${esc(info.title)}</h2>
       ${
         info.addr
-          ? `<p class="text-center text-sm text-neutral-300 mb-3">Server: <span class="font-mono text-green-300">${esc(
+          ? `<p class="text-center text-sm text-neutral-300 mb-1">Server: <span class="font-mono text-green-300">${esc(
               info.addr,
             )}</span></p>`
-          : `<div class="mb-3"></div>`
+          : `<div class="mb-1"></div>`
       }
-      <div class="flex flex-col gap-2 mb-4">${chips}</div>
+      <p id="lobby-count" class="text-center text-[12px] text-neutral-400 mb-2">${esc(lobbyCountText(info.players))}</p>
+      <div id="lobby-players" class="flex flex-col gap-2 mb-4">${lobbyChipsHTML(info.players)}</div>
+      ${
+        info.hint
+          ? `<p class="text-center text-[11px] text-neutral-500 mb-3">${esc(info.hint)}</p>`
+          : ''
+      }
       <div class="grid grid-cols-2 gap-2.5">
         <button id="l-start" class="${BTN_GREEN}">FIGHT!</button>
         <button id="l-leave" class="${BTN_GHOST}">LEAVE</button>
       </div>`);
     (this.screen.querySelector('#l-start') as HTMLButtonElement).onclick = () => cb.onStart();
     (this.screen.querySelector('#l-leave') as HTMLButtonElement).onclick = () => cb.onLeave();
+  }
+
+  /**
+   * Live-update lobby chips + player count (e.g. from NetClient onRoster)
+   * without rebuilding the buttons, so handlers stay wired. No-op when no
+   * lobby is shown.
+   */
+  updateLobby(players: LobbyPlayer[]): void {
+    const chips = this.screen.querySelector('#lobby-players');
+    if (chips) chips.innerHTML = lobbyChipsHTML(players);
+    const count = this.screen.querySelector('#lobby-count');
+    if (count) count.textContent = lobbyCountText(players);
+  }
+
+  /** Update the join-setup `#s-count` status line. No-op when not shown. */
+  setSetupCount(text: string, ok: boolean): void {
+    const el = this.screen.querySelector<HTMLElement>('#s-count');
+    if (el) {
+      el.textContent = text;
+      el.className = `text-[12px] ${ok ? 'text-green-300' : 'text-neutral-400'}`;
+    }
   }
 
   showHow(cb: { onBack(): void }): void {

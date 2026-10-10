@@ -32,6 +32,7 @@ import type {
 import type { SnapshotEvent } from "../shared/protocol.js";
 import { LEVELS } from "../src/levels/levels.js";
 import { WEAPONS as CANON_WEAPONS } from "../src/weapons/defs.js";
+import { separatePlayers } from "../src/entities/player.js";
 
 export interface MatchInput {
   left: boolean;
@@ -60,6 +61,12 @@ export const emptyInput = (): MatchInput => ({
 
 export const PW = 26;
 export const PH = 54;
+// Wall-slide + wall-jump tuning (mirrors src/physics/world.ts).
+const WALL_SLIDE_CAP = 180;
+const WALL_JUMP_VX = 380;
+const WALL_JUMP_VY_SCALE = 0.92;
+const WALL_LOCK = 0.18;
+const ROTATOR_CARRY = 55;
 const WIN_SCORE = 5;
 const DROP_INTERVAL = 4;
 const MAX_DROPS = 6;
@@ -167,6 +174,8 @@ interface Solid {
   x: number; y: number; w: number; h: number;
   type?: string;
   beltPx?: number;
+  mi?: number;
+  ri?: number;
 }
 
 export class Match {
@@ -201,6 +210,7 @@ export class Match {
   private bossTime = 0;
   private stompCd = new Map<number, number>();
   private lastPickup = new Map<number, number>();
+  private wallLocks = new Map<number, number>();
 
   constructor(level: LevelDef, opts?: { cycle?: LevelDef[]; winsTarget?: number }) {
     this.level = level;
@@ -233,6 +243,7 @@ export class Match {
     this.blocking.delete(id);
     this.stompCd.delete(id);
     this.lastPickup.delete(id);
+    this.wallLocks.delete(id);
     this.burns.delete(id);
     this.burnOwners.delete(id);
     this.frosts.delete(id);
@@ -329,6 +340,9 @@ export class Match {
       this.checkHazards(p);
     }
 
+    // Player-player soft collision so fighters can't share one body.
+    separatePlayers(this.players);
+
     this.stepProjectiles(dt);
     this.stepCrates(dt);
     this.stepDrops(dt);
@@ -365,6 +379,7 @@ export class Match {
     this.bossTime = 0;
     this.bossId = null;
     this.stompCd.clear();
+    this.wallLocks.clear();
     this.crates = (this.level.crates ?? []).map((c) => ({
       x: (c.x * WORLD_W) | 0, y: (c.y * WORLD_H) | 0,
       w: Math.max(20, c.w * WORLD_W), h: Math.max(20, c.h * WORLD_H),
@@ -450,7 +465,8 @@ export class Match {
       out.push({
         x: m.x * WORLD_W + (m.axis === "x" ? off : 0),
         y: m.y * WORLD_H + (m.axis === "y" ? off : 0),
-        w: m.w * WORLD_W, h: m.h * WORLD_H, type: "static",
+        w: m.w * WORLD_W, h: m.h * WORLD_H, type: "mover",
+        mi: (this.level.movers ?? []).indexOf(m),
       });
     }
     for (const r of this.level.rotators ?? []) {
@@ -458,10 +474,33 @@ export class Match {
       const pw = r.w * WORLD_W, ph = r.h * WORLD_H;
       const c = Math.abs(Math.cos(a)), s = Math.abs(Math.sin(a));
       const bw = pw * c + ph * s, bh = pw * s + ph * c;
-      out.push({ x: r.cx * WORLD_W - bw / 2, y: r.cy * WORLD_H - bh / 2, w: bw, h: bh, type: "rotator" });
+      out.push({ x: r.cx * WORLD_W - bw / 2, y: r.cy * WORLD_H - bh / 2, w: bw, h: bh, type: "rotator", ri: (this.level.rotators ?? []).indexOf(r) });
     }
     for (const c of this.crates) out.push({ x: c.x, y: c.y, w: c.w, h: c.h, type: "static" });
     return out;
+  }
+
+  /** Frame delta of mover #mi (pixel space), computed as pos(t) - pos(t-dt). */
+  private moverDelta(mi: number, dt: number): { dx: number; dy: number } {
+    const m = (this.level.movers ?? [])[mi];
+    if (!m || dt <= 0) return { dx: 0, dy: 0 };
+    const per = Math.max(0.1, m.period);
+    const f = (t: number) => Math.sin((t * Math.PI * 2) / per + (m.phase ?? 0)) * m.range * (m.axis === "x" ? WORLD_W : WORLD_H);
+    const d = f(this.time) - f(this.time - dt);
+    return m.axis === "x" ? { dx: d, dy: 0 } : { dx: 0, dy: d };
+  }
+
+  /** Side-wall probe for wall-slide: solid adjacent on input side? */
+  private touchingWall(p: PlayerState, solids: Solid[], dir: number): 1 | -1 | 0 {
+    if (dir === 0) return 0;
+    const px = p.x + dir * (PW / 2 + 2);
+    const ys = [p.y + 8, p.y + PH / 2, p.y + PH - 4];
+    for (const s of solids) {
+      for (const y of ys) {
+        if (px > s.x && px < s.x + s.w && y > s.y && y < s.y + s.h) return dir > 0 ? 1 : -1;
+      }
+    }
+    return 0;
   }
 
   private movePlayer(p: PlayerState, inp: MatchInput, dt: number): void {
@@ -476,16 +515,38 @@ export class Match {
     const target = dir * MOVE_SPEED * speedMult;
     p.vx += (target - p.vx) * Math.min(1, (p.onGround ? 14 : 7) * accel * dt);
     if (glued && p.onGround) p.vx *= 1 - Math.min(1, 8 * dt);
+    const solids = this.solids();
+    // Wall-slide probe: airborne, falling, pressing into a side wall.
+    // p.onGround / p.vy here still hold last tick's post-collision values.
+    const lock = (this.wallLocks.get(p.id) ?? 0) - dt;
+    this.wallLocks.set(p.id, Math.max(0, lock));
+    const wallSide = !p.onGround && dir !== 0 && p.vy > 0 && lock <= 0
+      ? this.touchingWall(p, solids, dir)
+      : 0;
+    const sliding = wallSide !== 0;
+    (p as any).sliding = sliding;
+    (p as any).wallDir = wallSide;
     p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
+    // Slide friction: cap fall speed while sliding.
+    if (sliding && !p.onGround && p.vy > WALL_SLIDE_CAP) p.vy = WALL_SLIDE_CAP;
     const wasGround = p.onGround;
     const prevJump = this.prevJump.get(p.id) ?? false;
     if (!glued && inp.jump && !prevJump && (p.onGround || this.propTop(p))) {
       p.vy = -JUMP_SPEED * (frosted ? 0.8 : 1);
       p.onGround = false;
+      (p as any).sliding = false;
+    } else if (!glued && inp.jump && !prevJump && sliding && !p.onGround) {
+      // Wall-jump: push off away from the wall, slightly weaker vertically.
+      p.vx = -wallSide * WALL_JUMP_VX;
+      p.vy = -JUMP_SPEED * WALL_JUMP_VY_SCALE * (frosted ? 0.8 : 1);
+      p.facing = p.vx >= 0 ? 1 : -1;
+      p.onGround = false;
+      (p as any).sliding = false;
+      (p as any).wallDir = 0;
+      this.wallLocks.set(p.id, WALL_LOCK);
     }
     void wasGround;
 
-    const solids = this.solids();
     // X axis
     p.x += p.vx * dt;
     for (const s of solids) {
@@ -510,6 +571,19 @@ export class Match {
           p.y = s.y + s.h;
           p.vy = 0;
         }
+      }
+    }
+    if (p.onGround) {
+      (p as any).sliding = false;
+      (p as any).wallDir = 0;
+      // Mover carry: ride the platform's frame delta; rotators push tangentially.
+      if (ground?.type === "mover" && ground.mi !== undefined) {
+        const d = this.moverDelta(ground.mi, dt);
+        p.x += d.dx;
+        p.y += d.dy;
+      } else if (ground?.type === "rotator" && ground.ri !== undefined) {
+        const r = (this.level.rotators ?? [])[ground.ri];
+        if (r) p.x += r.angleSpeed * ROTATOR_CARRY * dt;
       }
     }
     if (ground?.type === "bouncy") {
@@ -1082,6 +1156,8 @@ export class Match {
       inp.down = true;
       inp.fire = true;
     }
+    // Bots wall-jump when sliding (sliding flag is refreshed each tick in movePlayer).
+    if ((p as any).sliding && (this.wallLocks.get(p.id) ?? 0) <= 0) inp.jump = true;
     return inp;
   }
 }

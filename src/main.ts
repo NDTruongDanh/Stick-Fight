@@ -109,7 +109,12 @@ function showHostSetup(): void {
     const host = window.location.hostname || 'localhost';
     const addr = `${host}:8080`;
     ui.showLobby(
-      { title: 'LOBBY — HOST', addr: `ws://${addr}`, players: [{ name: d.name, color: PLAYER_COLORS[0], bot: false }] },
+      {
+        title: 'LOBBY — HOST',
+        addr: `ws://${addr}`,
+        players: [{ name: d.name, color: PLAYER_COLORS[0], bot: false }],
+        hint: 'lobby chat: /ready · /unready (auto-starts when all 2+ ready) · host: /start /restart /kick <name> /bots <n>',
+      },
       {
         onStart: () => void startOnline(`ws://${addr}`, d.name),
         onLeave: showMenu,
@@ -139,6 +144,56 @@ function showJoinSetup(): void {
     if (!url) { ui.toast('Enter a valid address, e.g. ws://192.168.1.10:8080'); return; }
     void startOnline(url, d.name);
   }, { ip: true, startLabel: 'CONNECT' });
+  wireJoinCountCheck();
+}
+
+/**
+ * CHECK PLAYERS probe: opens a short-lived NetClient named SCOUT, renders the
+ * live lobby count (players + ready) from the first roster broadcast, then
+ * disconnects. Single-use per click; failures map to actionable status text.
+ */
+function wireJoinCountCheck(): void {
+  const checkBtn = ui.root.querySelector<HTMLButtonElement>('#s-check');
+  const ipInput = ui.root.querySelector<HTMLInputElement>('#s-ip');
+  if (!checkBtn || !ipInput) return;
+  checkBtn.onclick = () => {
+    const url = normalizeWsUrl(ipInput.value || '');
+    if (!url) { ui.toast('Enter a valid address, e.g. ws://192.168.1.10:8080'); return; }
+    checkBtn.disabled = true;
+    checkBtn.textContent = 'CHECKING…';
+    ui.setSetupCount('connecting…', false);
+    void (async () => {
+      let probe: { close(): void } | null = null;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let done = false;
+      const finish = (text: string, ok: boolean): void => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        ui.setSetupCount(text, ok);
+        checkBtn.disabled = false;
+        checkBtn.textContent = 'CHECK PLAYERS';
+        try { probe?.close(); } catch { /* already closed */ }
+      };
+      timer = setTimeout(() => finish('no roster yet — is the server still starting?', false), 5000);
+      try {
+        const { NetClient } = await import('./net/NetClient.js');
+        if (done) return;
+        const nc = new NetClient();
+        probe = nc;
+        nc.onRoster = (r) => {
+          const players = r.players as { bot: boolean; ready?: boolean }[];
+          const humans = players.filter((p) => !p.bot).length;
+          const ready = players.filter((p) => !p.bot && p.ready).length;
+          finish(`${players.length}/4 in lobby · ${ready}/${humans} ready`, true);
+        };
+        nc.onClose = () => finish('server unreachable — is `npm run host` running?', false);
+        await nc.connect(url, 'SCOUT');
+      } catch (err) {
+        finish(connectErrorToast(err), false);
+      }
+    })();
+  };
 }
 
 /** Map low-level NetClient connect failures to actionable toasts. */

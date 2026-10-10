@@ -46,9 +46,16 @@ const BURN_TIME = 1.2;
 const isInfinite = (w: WeaponId): boolean => WEAPONS[w].magSize >= 9000;
 const fullAmmo = (w: WeaponId): number => (isInfinite(w) ? -1 : WEAPONS[w].magSize);
 
-interface R { id: number; name: string; color: string; x: number; y: number; vx: number; vy: number; hp: number; alive: boolean; weapon: WeaponId; ammo: number; cd: number; face: 1 | -1; ax: number; ay: number; onGround: boolean; wins: number; bot: boolean; walk: number; flash: number; swing: number; block: boolean; dropT: number; fireHeld: boolean; prevFire: boolean; ground: string; st: number; burnT: number; invuln: number; squash: number; deadT: number; muzzle: number; boss: boolean; maxHp: number; stompCd: number; frostT: number; glueT: number }
+interface R { id: number; name: string; color: string; x: number; y: number; vx: number; vy: number; hp: number; alive: boolean; weapon: WeaponId; ammo: number; cd: number; face: 1 | -1; ax: number; ay: number; onGround: boolean; wins: number; bot: boolean; walk: number; flash: number; swing: number; block: boolean; dropT: number; fireHeld: boolean; prevFire: boolean; ground: string; st: number; burnT: number; invuln: number; squash: number; deadT: number; muzzle: number; boss: boolean; maxHp: number; stompCd: number; frostT: number; glueT: number; slide: boolean; wallD: 1 | -1 | 0; wallLock: number }
 interface Proj { x: number; y: number; vx: number; vy: number; life: number; owner: number; kind: WeaponId | 'thrown'; dmg: number; fuse: number; explosive: number; grav: number; bounces: number; thrownW?: WeaponId; ammo?: number }
-interface Solid { x: number; y: number; w: number; h: number; type: string; belt?: number }
+interface Solid { x: number; y: number; w: number; h: number; type: string; belt?: number; mi?: number; ri?: number }
+
+// Wall-slide + wall-jump tuning (mirrors src/physics/world.ts).
+const WALL_SLIDE_CAP = 180;
+const WALL_JUMP_VX = 380;
+const WALL_JUMP_VY_SCALE = 0.92;
+const WALL_LOCK = 0.18;
+const ROTATOR_CARRY = 55;
 interface Part { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number }
 interface Beam { x1: number; y1: number; x2: number; y2: number; t: number; color: string }
 const MAPS = [ // P1: WASD + mouse. P2: arrows + auto-aim.
@@ -92,7 +99,7 @@ export class LocalMode {
     const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('no 2d context'); this.ctx = ctx; let seed = 12345; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647; this.deco = Array.from({ length: 70 }, () => ({ x: rnd() * W, y: rnd() * H * 0.7, s: 1 + rnd() * 3 }));
     const total = Math.min(4, Math.max(1, opts.humans + opts.bots));
     const nH = Math.min(opts.humans, 2);
-    for (let i = 0; i < total; i++) this.players.push({ id: i, name: i === 0 && opts.humans > 0 ? 'YOU' : PLAYER_NAMES[i], color: PLAYER_COLORS[i], x: 0, y: 0, vx: 0, vy: 0, hp: PLAYER_HP, alive: true, weapon: 'fists', ammo: -1, cd: 0, face: i % 2 === 0 ? 1 : -1, ax: 0, ay: 0, onGround: false, wins: 0, bot: i >= nH, walk: 0, flash: 0, swing: 0, block: false, dropT: 0, fireHeld: false, prevFire: false, ground: '', st: 0, burnT: 0, invuln: 0, squash: 0, deadT: 0, muzzle: 0, boss: false, maxHp: PLAYER_HP, stompCd: 0, frostT: 0, glueT: 0 });
+    for (let i = 0; i < total; i++) this.players.push({ id: i, name: i === 0 && opts.humans > 0 ? 'YOU' : PLAYER_NAMES[i], color: PLAYER_COLORS[i], x: 0, y: 0, vx: 0, vy: 0, hp: PLAYER_HP, alive: true, weapon: 'fists', ammo: -1, cd: 0, face: i % 2 === 0 ? 1 : -1, ax: 0, ay: 0, onGround: false, wins: 0, bot: i >= nH, walk: 0, flash: 0, swing: 0, block: false, dropT: 0, fireHeld: false, prevFire: false, ground: '', st: 0, burnT: 0, invuln: 0, squash: 0, deadT: 0, muzzle: 0, boss: false, maxHp: PLAYER_HP, stompCd: 0, frostT: 0, glueT: 0, slide: false, wallD: 0, wallLock: 0 });
     // Custom editor level (trusted editor output) goes first in the rotation.
     if (opts.customLevel) {
       this.rotation = [{ ...opts.customLevel, id: 'custom' }, ...LEVELS];
@@ -211,7 +218,7 @@ export class LocalMode {
         const insideY = p.y > pl.y && p.y - 68 < pl.y + pl.h;
         if (insideX && insideY) p.y = pl.y; // stand on top instead of stuck inside
       }
-      p.vx = 0; p.vy = 0; p.hp = p.boss ? BOSS_HP : PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = ''; p.stompCd = 0; p.frostT = 0; p.glueT = 0;
+      p.vx = 0; p.vy = 0; p.hp = p.boss ? BOSS_HP : PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = ''; p.stompCd = 0; p.frostT = 0; p.glueT = 0; p.slide = false; p.wallD = 0; p.wallLock = 0;
     });
     this.projs = []; this.fuses = []; this.drops = []; this.beams = []; this.dropRespawn = [];
     this.crates = (lv.crates ?? []).map((c) => ({ x: c.x * W, y: c.y * H, w: c.w * W, h: c.h * H, vy: 0 })); this.barrels = (lv.barrels ?? []).map((b) => ({ x: b.x * W, y: b.y * H, hp: 30 }));
@@ -276,10 +283,51 @@ export class LocalMode {
       if (p.type === 'blink') { const per = p.period ?? 3; if ((this.time + (p.phase ?? 0)) % per > (p.duty ?? 0.6) * per) continue; }
       out.push({ x: p.x * W, y: p.y * H, w: p.w * W, h: p.h * H, type: p.type ?? 'static', belt: p.beltSpeed });
     }
-    for (const m of lv.movers ?? []) { const o = Math.sin((2 * Math.PI * (this.time + (m.phase ?? 0))) / m.period) * m.range * (m.axis === 'x' ? W : H); out.push({ x: m.x * W + (m.axis === 'x' ? o : 0), y: m.y * H + (m.axis === 'y' ? o : 0), w: m.w * W, h: m.h * H, type: 'mover' }); }
-    for (const r of lv.rotators ?? []) out.push(this.rotatorBox(r.cx, r.cy, r.w, r.h, r.angleSpeed));
+    for (const m of lv.movers ?? []) { const o = Math.sin((2 * Math.PI * (this.time + (m.phase ?? 0))) / m.period) * m.range * (m.axis === 'x' ? W : H); out.push({ x: m.x * W + (m.axis === 'x' ? o : 0), y: m.y * H + (m.axis === 'y' ? o : 0), w: m.w * W, h: m.h * H, type: 'mover', mi: (lv.movers ?? []).indexOf(m) }); }
+    for (const r of lv.rotators ?? []) { const b = this.rotatorBox(r.cx, r.cy, r.w, r.h, r.angleSpeed); b.ri = (lv.rotators ?? []).indexOf(r); out.push(b); }
     for (const c of this.crates) out.push({ x: c.x, y: c.y, w: c.w, h: c.h, type: 'crate' });
     return out;
+  }
+
+  /** Frame delta of mover #mi (pixel space), computed as pos(t) - pos(t-dt). */
+  private moverDelta(mi: number, dt: number): { dx: number; dy: number } {
+    const m = (this.level().movers ?? [])[mi];
+    if (!m || dt <= 0) return { dx: 0, dy: 0 };
+    const f = (t: number) => Math.sin((2 * Math.PI * (t + (m.phase ?? 0))) / m.period) * m.range * (m.axis === 'x' ? W : H);
+    const d = f(this.time) - f(this.time - dt);
+    return m.axis === 'x' ? { dx: d, dy: 0 } : { dx: 0, dy: d };
+  }
+
+  /** Side-wall probe for wall-slide: solid adjacent on input side? */
+  private touchingWall(p: R, solids: Solid[], dir: number): 1 | -1 | 0 {
+    if (dir === 0) return 0;
+    const px = p.x + dir * 14;
+    const ys = [p.y - 60, p.y - 34, p.y - 6];
+    for (const s of solids) {
+      for (const y of ys) {
+        if (px > s.x && px < s.x + s.w && y > s.y && y < s.y + s.h) return dir > 0 ? 1 : -1;
+      }
+    }
+    return 0;
+  }
+
+  /** Player-player soft collision: overlap splits apart horizontally, no damage. */
+  private separatePlayers(): void {
+    const ps = this.players.filter((p) => p.alive);
+    for (let i = 0; i < ps.length; i++) {
+      for (let j = i + 1; j < ps.length; j++) {
+        const a = ps[i], b = ps[j];
+        const overlapY = Math.min(a.y, b.y) - Math.max(a.y - 68, b.y - 68);
+        if (overlapY <= 0) continue;
+        const dx = b.x - a.x;
+        const overlapX = 24 - Math.abs(dx);
+        if (overlapX <= 0) continue;
+        const push = overlapX / 2 + 0.5;
+        const s = dx >= 0 ? 1 : -1;
+        a.x = Math.max(12, Math.min(W - 12, a.x - s * push));
+        b.x = Math.max(12, Math.min(W - 12, b.x + s * push));
+      }
+    }
   }
 
   private burst(x: number, y: number, n: number, color: string, spd = 380): void {
@@ -404,6 +452,8 @@ export class LocalMode {
     if ((o.l || o.r) && Math.abs(b.vx) < 30 && b.onGround && b.st > 0.4) { o.j = true; b.st = 0; }
     else if (Math.abs(b.vx) > 60) b.st = 0;
     if (Math.random() < 0.002) o.j = true;
+    // Bots wall-jump when sliding (slide flag is refreshed each tick in update).
+    if (b.slide && b.wallLock <= 0) o.j = true;
     return o;
   }
 
@@ -682,16 +732,42 @@ export class LocalMode {
       if (p.ground === 'conveyor') { const s = solids.find((q) => q.type === 'conveyor'); if (s?.belt) p.vx += s.belt * W * dt; }
       const wasGround = p.onGround;
       const fallSpeed = p.vy;
-      if (!glued && J && (p.onGround || this.onProp(p))) { p.vy = -JUMP_SPEED * (frosted ? 0.8 : 1); p.onGround = false; this.sfx.jump(); }
+      // Wall-slide probe: airborne, falling, pressing into a side wall.
+      p.wallLock = Math.max(0, p.wallLock - dt);
+      p.wallD = !wasGround && dir !== 0 && p.vy > 0 && p.wallLock <= 0 ? this.touchingWall(p, solids, dir) : 0;
+      p.slide = p.wallD !== 0;
+      if (!glued && J && (p.onGround || this.onProp(p))) { p.vy = -JUMP_SPEED * (frosted ? 0.8 : 1); p.onGround = false; p.slide = false; this.sfx.jump(); }
+      else if (!glued && J && p.slide) {
+        // Wall-jump: push off away from the wall, slightly weaker vertically.
+        p.vx = -p.wallD * WALL_JUMP_VX;
+        p.vy = -JUMP_SPEED * WALL_JUMP_VY_SCALE * (frosted ? 0.8 : 1);
+        p.face = p.vx >= 0 ? 1 : -1;
+        p.onGround = false; p.slide = false; p.wallD = 0; p.wallLock = WALL_LOCK;
+        this.sfx.jump();
+        this.burst(p.x, p.y - 34, 5, '#d6d3d1', 180);
+      }
       if (D) p.dropT = 0.25; else p.dropT = Math.max(0, p.dropT - dt);
       p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
+      if (p.slide && !p.onGround && p.vy > WALL_SLIDE_CAP) p.vy = WALL_SLIDE_CAP;
+      if (p.slide && !p.onGround && Math.random() < 0.4) {
+        // Wall-slide dust on the contact side.
+        this.parts.push({ x: p.x + p.wallD * 12, y: p.y - 24 - Math.random() * 28, vx: -p.wallD * 70, vy: 70, life: 0.3, max: 0.3, color: '#d6d3d1', size: 2 });
+      }
       p.x += p.vx * dt;
       for (const s of solids) if (this.collideBox(p.x, p.y, s)) { p.x = p.vx > 0 ? s.x - 12 : p.vx < 0 ? s.x + s.w + 12 : p.x; p.vx = 0; }
       p.x = Math.max(12, Math.min(W - 12, p.x));
       const prevY = p.y; p.y += p.vy * dt; p.onGround = false; p.ground = '';
       if (p.dropT <= 0) for (const s of solids) {
         if (p.x + 11 > s.x && p.x - 11 < s.x + s.w && p.y >= s.y && prevY <= s.y + 12 && p.vy >= 0) {
-          p.y = s.y; p.onGround = true; p.ground = s.type;
+          p.y = s.y; p.onGround = true; p.ground = s.type; p.slide = false; p.wallD = 0;
+          // Mover carry: ride the platform's frame delta; rotators push tangentially.
+          if (s.type === 'mover' && s.mi !== undefined) {
+            const d = this.moverDelta(s.mi, dt);
+            p.x = Math.max(12, Math.min(W - 12, p.x + d.dx)); p.y += d.dy;
+          } else if (s.type === 'rotator' && s.ri !== undefined) {
+            const r = (this.level().rotators ?? [])[s.ri];
+            if (r) p.x = Math.max(12, Math.min(W - 12, p.x + r.angleSpeed * ROTATOR_CARRY * dt));
+          }
           if (s.type === 'bouncy') { p.vy = -1150; p.onGround = false; this.sfx.jump(); }
           else if (s.type === 'lava') this.hurt(p, 999, 0, -400, p.id, 'lava');
           else {
@@ -720,6 +796,8 @@ export class LocalMode {
       if (!isInfinite(p.weapon) && p.ammo <= 0 && !w.melee && !w.beam) { p.weapon = 'fists'; p.ammo = -1; }
       p.fireHeld = F;
     });
+    // Player-player soft collision so fighters can't share one body.
+    this.separatePlayers();
     const s2 = this.solids();
     for (const pr of this.projs) {
       pr.life -= dt;

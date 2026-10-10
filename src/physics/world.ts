@@ -13,7 +13,20 @@ import { denorm, type SolidRect } from '../levels/loader.js';
 export interface BodyState {
   x: number; y: number; w: number; h: number;
   vx: number; vy: number; onGround: boolean;
+  /** Side wall contact from the last collideMove X pass: +1 wall on right, -1 on left. */
+  wallDir?: -1 | 0 | 1;
+  /** Set by the caller (stepPlayer/modes) when pressing into a wall while airborne. */
+  sliding?: boolean;
+  /** Index into moverSolidAt() of the dynamic platform stood on, or -1. */
+  groundMover?: number;
 }
+
+/** Wall-slide / wall-jump tuning (shared by World, player.ts, LocalMode, Match). */
+export const WALL_SLIDE_CAP = 180;
+export const WALL_JUMP_VX = 380;
+export const WALL_JUMP_VY_SCALE = 0.92;
+/** Approx tangential carry (px/s per rad/s) when standing on a rotator AABB top. */
+export const ROTATOR_CARRY = 55;
 
 export interface CollideOpts { ice: boolean }
 
@@ -126,16 +139,29 @@ export class World {
 
   collideMove(body: BodyState, dt: number, opts: CollideOpts, time = this.time): void {
     const solids = this.activeSolids(time);
+    const prevDynamics = this.moverSolidAt(time - dt);
     const dynamics = this.moverSolidAt(time);
+    const deltas = dynamics.map((r, i) => ({
+      dx: r.x - (prevDynamics[i]?.x ?? r.x),
+      dy: r.y - (prevDynamics[i]?.y ?? r.y),
+    }));
     const crateBoxes: PixelRect[] = this.crates.map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }));
 
     // --- X axis ---
     body.x += body.vx * dt;
+    body.wallDir = 0;
     const boxX: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
     for (const s of [...solids, ...dynamics, ...crateBoxes]) {
       if (!overlaps(boxX, s)) continue;
-      if (body.vx > 0) body.x = s.x - body.w;
-      else if (body.vx < 0) body.x = s.x + s.w;
+      if (body.vx > 0) { body.x = s.x - body.w; body.wallDir = 1; }
+      else if (body.vx < 0) { body.x = s.x + s.w; body.wallDir = -1; }
+      else {
+        // Overlapping with no velocity (e.g. carried into a wall): push out minimally.
+        const pushL = boxX.x + boxX.w - s.x;
+        const pushR = s.x + s.w - boxX.x;
+        if (pushL < pushR) { body.x = s.x - body.w; body.wallDir = 1; }
+        else { body.x = s.x + s.w; body.wallDir = -1; }
+      }
       body.vx = 0;
       boxX.x = body.x;
     }
@@ -143,20 +169,23 @@ export class World {
     // --- Y axis ---
     body.y += body.vy * dt;
     body.onGround = false;
+    let groundDyn = -1;
     const boxY: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
-    const all: { r: PixelRect; solid: SolidRect | null }[] = [
-      ...solids.map((r) => ({ r, solid: r as SolidRect })),
-      ...dynamics.map((r) => ({ r, solid: null })),
-      ...crateBoxes.map((r) => ({ r, solid: null })),
+    const all: { r: PixelRect; solid: SolidRect | null; dyn: number }[] = [
+      ...solids.map((r) => ({ r, solid: r as SolidRect, dyn: -1 })),
+      ...dynamics.map((r, i) => ({ r, solid: null, dyn: i })),
+      ...crateBoxes.map((r) => ({ r, solid: null, dyn: -1 })),
     ];
-    for (const { r, solid } of all) {
+    for (const { r, solid, dyn } of all) {
       if (!overlaps(boxY, r)) continue;
       if (body.vy > 0) {
         body.y = r.y - body.h;
         body.onGround = true;
+        groundDyn = dyn;
         if (solid?.type === 'bouncy') {
           body.vy = -1300;
           body.onGround = false;
+          groundDyn = -1;
         } else if (solid?.type === 'conveyor') {
           body.x += solid.beltSpeed * WORLD_W * dt;
           body.vy = 0;
@@ -168,6 +197,21 @@ export class World {
         body.vy = 0;
       }
       boxY.y = body.y;
+    }
+    body.groundMover = groundDyn;
+    // Mover carry: standing on a moving platform drags the body by the
+    // platform's frame delta. Rotators use a tangential approximation.
+    if (body.onGround && groundDyn >= 0) {
+      const d = deltas[groundDyn];
+      if (d) {
+        if (groundDyn < this.movers.length) {
+          body.x += d.dx;
+          body.y += d.dy;
+        } else {
+          const rot = this.rotators[groundDyn - this.movers.length];
+          if (rot) body.x += rot.angleSpeed * ROTATOR_CARRY * dt;
+        }
+      }
     }
     void opts;
   }
