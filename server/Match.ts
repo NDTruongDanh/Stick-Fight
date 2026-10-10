@@ -99,7 +99,7 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
     bouncer: { life: 2.5, bounce: 6 },
     minigun: { life: 1.3 },
     grenade: { life: 3.2, gravity: 2400, explosive: { radius: 130, damage: 65 } },
-    rpg: { life: 3, gravity: 288, explosive: { radius: 150, damage: 80 } },
+    rpg: { life: 3, gravity: 288, explosive: { radius: 150, damage: 150 } },
     flamethrower: { life: 0.32 },
     sword: {},
     spear: {},
@@ -246,13 +246,13 @@ export class Match {
       }
     }
 
-    // Flamethrower burn DoT (12 dps for 1.2s, refreshable) — matches LocalMode.
+    // Flamethrower burn DoT (5 dps for 1.2s, refreshable) — matches LocalMode.
     for (const p of this.players) {
       const bt = this.burns.get(p.id) ?? 0;
       if (bt > 0 && p.alive) {
         if (bt - dt <= 0) this.burns.delete(p.id);
         else this.burns.set(p.id, bt - dt);
-        this.damage(p, 12 * dt, this.burnOwners.get(p.id) ?? p.id, 0, 0, "burn");
+        this.damage(p, 5 * dt, this.burnOwners.get(p.id) ?? p.id, 0, 0, "burn");
       }
     }
 
@@ -482,7 +482,7 @@ export class Match {
         while (da > Math.PI) da -= Math.PI * 2;
         while (da < -Math.PI) da += Math.PI * 2;
         if (Math.abs(da) > def.melee.arc / 2 + 0.25) continue;
-        this.damage(q, def.damage, p.id, dx * def.knockback, -260, p.weapon);
+        this.damage(q, def.damage, p.id, dx * def.knockback, -260, p.weapon, p.y + PH / 2 < q.y + PH * 0.25);
       }
       // Punch-boost: airborne fists swing kicks the attacker (mobility).
       if (p.weapon === "fists" && !p.onGround) {
@@ -562,7 +562,7 @@ export class Match {
     }
     hits.sort((a, b) => a.t - b.t);
     const targets = laser ? hits : hits.slice(0, 1);
-    for (const h of targets) this.damage(h.q, def.damage, p.id, dx * def.knockback, -220, p.weapon);
+    for (const h of targets) this.damage(h.q, def.damage, p.id, dx * def.knockback, -220, p.weapon, sy + dy * h.t < h.q.y + PH * 0.25);
     const endD = laser ? wallD : (targets.length ? targets[0].t : wallD);
     // Short tracer so remote clients see the beam (zero damage: skipped by hit code).
     this.projectiles.push({
@@ -609,9 +609,11 @@ export class Match {
     }
   }
 
-  private damage(q: PlayerState, dmg: number, fromId: number, kx: number, ky: number, cause = "fists"): void {
+  private damage(q: PlayerState, dmg: number, fromId: number, kx: number, ky: number, cause = "fists", headshot = false): void {
     if (!q.alive) return;
     let final = dmg;
+    // Headshot x2: hit within top 25% of victim AABB (top-based y, PH tall).
+    if (headshot) final *= 2;
     if (this.blocking.get(q.id)) {
       // Block reduces damage by 65% when facing the attacker.
       const attacker = this.players.find((p) => p.id === fromId);
@@ -642,7 +644,10 @@ export class Match {
       if (d > radius + 20) continue;
       const fall = 1 - (d / (radius + 20)) * 0.5;
       const a = Math.atan2(q.y + PH / 2 - y, q.x - x);
-      this.damage(q, dmg * fall, owner, Math.cos(a) * 620, Math.sin(a) * 620 - 200, "explosion");
+      // RPG self-damage cap: own blast capped at 50 so point-blank isn't
+      // always suicide at 100HP (canonical 150 direct + radius vs others).
+      const dealt = q.id === owner ? Math.min(dmg * fall, 50) : dmg * fall;
+      this.damage(q, dealt, owner, Math.cos(a) * 620, Math.sin(a) * 620 - 200, "explosion");
     }
   }
 
@@ -716,7 +721,8 @@ export class Match {
           if (!q.alive || q.id === pr.owner) continue;
           if (Math.abs(pr.x - q.x) < PW / 2 + 6 && pr.y > q.y - 6 && pr.y < q.y + PH + 6) {
             const a = Math.atan2(pr.vy, pr.vx);
-            this.damage(q, pr.damage, pr.owner, Math.cos(a) * 380, Math.sin(a) * 200 - 120, pr.thrown ? "thrown" : String(pr.kind));
+            const head = pr.y > q.y - 6 && pr.y < q.y + PH * 0.25;
+            this.damage(q, pr.damage, pr.owner, Math.cos(a) * 380, Math.sin(a) * 200 - 120, pr.thrown ? "thrown" : String(pr.kind), head);
             if (pr.thrown) this.drops.push({ x: pr.x, y: pr.y - 10, vx: pr.vx * 0.2, vy: -150, weapon: pr.kind, ammo: pr.ammo ?? WEAPONS[pr.kind].mag });
             else if (String(pr.kind) === "flamethrower") {
               this.burns.set(q.id, 1.2);

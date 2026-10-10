@@ -33,7 +33,7 @@ const TUNE: Record<WeaponId, Tune> = {
 
 const THROW_DAMAGE = 55;
 const BLOCK_FACTOR = 0.35; // block reduces damage by 65%
-const BURN_DPS = 12;
+const BURN_DPS = 5;
 const BURN_TIME = 1.2;
 
 const isInfinite = (w: WeaponId): boolean => WEAPONS[w].magSize >= 9000;
@@ -232,8 +232,10 @@ export class LocalMode {
     for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, v = spd * (0.3 + Math.random() * 0.7); this.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 150, life: 0.5 + Math.random() * 0.4, max: 0.9, color, size: 2 + Math.random() * 3 }); }
   }
 
-  private hurt(v: R, dmg: number, kx: number, ky: number, owner: number, cause: string): void {
+  private hurt(v: R, dmg: number, kx: number, ky: number, owner: number, cause: string, headshot = false): void {
     if (!v.alive || this.frozen) return;
+    // Headshot x2: hit within top 25% of victim AABB (feet-based y, 68px tall).
+    if (headshot) dmg *= 2;
     // Spawn invuln (1s) absorbs combat damage but not falls/lava.
     if (v.invuln > 0 && cause !== 'fell' && cause !== 'lava' && dmg < 900) return;
     const wasBlock = v.block;
@@ -267,7 +269,7 @@ export class LocalMode {
     this.sfx.boom();
     for (const p of this.players) {
       const dx = p.x - x, dy = (p.y - 34) - y, d = Math.hypot(dx, dy);
-      if (p.alive && d < r) { const f = 1 - (d / r) * 0.6; this.hurt(p, dmg * f, (dx / (d || 1)) * 650 * f, -380 * f, owner, 'explosion'); }
+      if (p.alive && d < r) { const f = 1 - (d / r) * 0.6; const dealt = p.id === owner ? Math.min(dmg * f, 50) : dmg * f; this.hurt(p, dealt, (dx / (d || 1)) * 650 * f, -380 * f, owner, 'explosion'); }
     }
     for (const b of this.barrels) if (b.hp > 0 && Math.hypot(b.x - x, b.y - y) < r) { b.hp = 0; this.fuses.push({ x: b.x, y: b.y, t: 0.12, r: 150, dmg: 55, owner }); }
   }
@@ -325,8 +327,8 @@ export class LocalMode {
     const maxD = 2200;
     // Laser burns through walls (original behavior); sniper is stopped by cover.
     const wallD = p.weapon === 'laser' ? maxD : this.rayWallDist(sx, sy, dx, dy, maxD);
-    const laserHits: R[] = [];
-    let best: R | null = null, bestD = wallD;
+    const laserHits: { e: R; t: number }[] = [];
+    let best: R | null = null, bestD = wallD, bestT = 0;
     for (const e of this.players) {
       if (e === p || !e.alive) continue;
       const rx = e.x - sx, ry = (e.y - 34) - sy;
@@ -334,15 +336,16 @@ export class LocalMode {
       if (t < 0 || t > bestD) continue;
       const perp = Math.abs(rx * dy - ry * dx);
       if (perp >= 20) continue;
-      if (p.weapon === 'laser') laserHits.push(e);
-      else if (t < bestD) { best = e; bestD = t; }
+      if (p.weapon === 'laser') laserHits.push({ e, t });
+      else if (t < bestD) { best = e; bestD = t; bestT = t; }
     }
     const ex = sx + dx * wallD, ey = sy + dy * wallD;
     const color = p.weapon === 'laser' ? '#22d3ee' : '#fef08a';
     this.beams.push({ x1: sx, y1: sy, x2: ex, y2: ey, t: 0.18, color });
     this.burst(ex, ey, 8, color, 260);
-    if (best) this.hurt(best, w.damage, dx * w.knockback, -220, p.id, p.weapon);
-    else for (const e of laserHits) this.hurt(e, w.damage, dx * w.knockback, -220, p.id, p.weapon);
+    // Headshot x2: beam strike within top 25% of victim (head = top 17px of 68px body).
+    if (best) this.hurt(best, w.damage, dx * w.knockback, -220, p.id, p.weapon, sy + dy * bestT < best.y - 51);
+    else for (const h of laserHits) this.hurt(h.e, w.damage, dx * w.knockback, -220, p.id, p.weapon, sy + dy * h.t < h.e.y - 51);
     if (!isInfinite(p.weapon) && p.ammo > 0) p.ammo--;
     if (!isInfinite(p.weapon) && p.ammo === 0) { p.weapon = 'fists'; p.ammo = -1; }
     p.cd = w.fireInterval;
@@ -367,7 +370,7 @@ export class LocalMode {
         if (e === p || !e.alive) continue;
         const dx = e.x - sx, dy = (e.y - 34) - sy, d = Math.hypot(dx, dy);
         let da = Math.abs(Math.atan2(dy, dx) - aim); if (da > Math.PI) da = 2 * Math.PI - da;
-        if (d < w.melee.range + 20 && da < w.melee.arc / 2 + 0.35) this.hurt(e, w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon);
+        if (d < w.melee.range + 20 && da < w.melee.arc / 2 + 0.35) this.hurt(e, w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon, sy < e.y - 51);
       }
       // Punch-boost: swinging fists airborne kicks the attacker (mobility).
       if (p.weapon === 'fists' && !p.onGround) {
@@ -589,10 +592,11 @@ export class LocalMode {
       for (const e of this.players) {
         if (!e.alive || e.id === pr.owner || pr.life <= 0) continue;
         if (Math.abs(pr.x - e.x) >= 14 || pr.y <= e.y - 70 || pr.y >= e.y) continue;
-        if (pr.kind === 'thrown' && pr.thrownW) { this.hurt(e, pr.dmg, pr.vx * 0.5, -250, pr.owner, 'thrown'); this.drops.push({ x: pr.x, y: pr.y - 10, vx: pr.vx * 0.2, vy: -150, weapon: pr.thrownW, ammo: pr.ammo ?? 0 }); }
+        const head = pr.y < e.y - 51;
+        if (pr.kind === 'thrown' && pr.thrownW) { this.hurt(e, pr.dmg, pr.vx * 0.5, -250, pr.owner, 'thrown', head); this.drops.push({ x: pr.x, y: pr.y - 10, vx: pr.vx * 0.2, vy: -150, weapon: pr.thrownW, ammo: pr.ammo ?? 0 }); }
         else if (pr.explosive) this.explode(pr.x, pr.y, pr.explosive, pr.dmg, pr.owner);
         else {
-          this.hurt(e, pr.dmg, pr.vx * 0.28, -120, pr.owner, String(pr.kind));
+          this.hurt(e, pr.dmg, pr.vx * 0.28, -120, pr.owner, String(pr.kind), head);
           if (pr.kind === 'flamethrower') { e.burnT = BURN_TIME; this.burst(pr.x, pr.y, 3, '#fb923c', 160); }
         }
         pr.life = 0; break;
