@@ -115,7 +115,18 @@ function showHostSetup(): void {
         onLeave: showMenu,
       },
     );
-    ui.toast('Run `npm run host` on this machine, then press FIGHT!');
+    // The browser cannot inject a file into the node server process: a staged
+    // custom map (HOST setup file picker) still needs the CLI flag.
+    let hint = 'Run `npm run host` on this machine, then press FIGHT!';
+    try {
+      const staged = localStorage.getItem('sf_host_custom_name');
+      if (staged && localStorage.getItem('sf_host_custom')) {
+        hint = `Custom map staged — run \`npm run host -- --level-file ${staged}\`, then press FIGHT!`;
+      }
+    } catch {
+      /* storage unavailable — generic hint */
+    }
+    ui.toast(hint);
   });
 }
 

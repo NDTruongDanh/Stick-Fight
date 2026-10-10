@@ -6,6 +6,7 @@ const SPEEDS: Partial<Record<WeaponId, number>> = {
   m16: 1100, sniper: 1900, shotgun: 850, sawedoff: 750, bouncer: 800,
   minigun: 950, grenade: 620, rpg: 700, flamethrower: 520, laser: 1500,
   spear: 900, sword: 0, fists: 0, snake: 260, snakeshot: 260,
+  ice: 700, glue: 650,
 };
 
 const DAMAGE: Partial<Record<WeaponId, number>> = {
@@ -13,6 +14,7 @@ const DAMAGE: Partial<Record<WeaponId, number>> = {
   sniper: 55, shotgun: 8, sawedoff: 9, bouncer: 14, minigun: 7,
   grenade: 45, rpg: 60, flamethrower: 4, laser: 25, spear: 25,
   sword: 30, fists: 12, snake: 5, snakeshot: 5,
+  ice: 8, glue: 5,
 };
 
 const KNOCK: Partial<Record<WeaponId, number>> = {
@@ -20,6 +22,14 @@ const KNOCK: Partial<Record<WeaponId, number>> = {
   m16: 220, sniper: 700, shotgun: 420, sawedoff: 520, bouncer: 300,
   minigun: 140, grenade: 650, rpg: 750, flamethrower: 60, laser: 260,
   spear: 380, sword: 420, fists: 320, snake: 200, snakeshot: 200,
+  ice: 200, glue: 150,
+};
+
+// Raw gravity (px/s^2) for arcing droplets. Snakes/others use 0.
+const PROJ_GRAV: Partial<Record<WeaponId, number>> = {
+  grenade: 2400,
+  ice: 1200,
+  glue: 900,
 };
 
 const PW = 26;
@@ -50,6 +60,9 @@ export class Projectiles extends Array<ProjectileState> {
   spawn(kind: WeaponId, x: number, y: number, vx: number, vy: number, owner: number, life = 2): ProjectileState {
     // Snakes live 6s (gravity 0, homing in step()).
     if ((kind === 'snake' || kind === 'snakeshot') && life === 2) life = 6;
+    // Arcing status droplets default to their tuned lifetimes.
+    if (kind === 'ice' && life === 2) life = 1.2;
+    if (kind === 'glue' && life === 2) life = 1.5;
     const p: ProjectileState = {
       id: this.nextId++, kind, x, y, vx, vy, life, owner,
       bounces: kind === 'bouncer' ? 3 : 0,
@@ -72,6 +85,11 @@ export class Projectiles extends Array<ProjectileState> {
       const prevY = pr.y;
 
       if (pr.kind === 'grenade') pr.vy += GRAVITY * dt;
+      // Ice/glue droplets arc under their tuned gravity.
+      else {
+        const g = PROJ_GRAV[pr.kind];
+        if (g) pr.vy += g * dt;
+      }
 
       // Snake homing: steer toward nearest living enemy (not owner),
       // turn rate limited to ~3 rad/s, speed preserved, gravity 0.
@@ -135,6 +153,12 @@ export class Projectiles extends Array<ProjectileState> {
           pl.vx += nx * kb * mult + (blocking ? 0 : nx * 60);
           pl.vy += ny * kb * mult * 0.6 - 120 * mult;
           (pl as any).hpBlink = 0.18;
+          // Status effects: ice frosts (2s slow), glue roots (stacking, max 3s).
+          if (pr.kind === 'ice') (pl as any).frostT = 2;
+          else if (pr.kind === 'glue') {
+            const cur = Number((pl as any).glueT) || 0;
+            (pl as any).glueT = Math.min(3, cur + 1);
+          }
           if (pl.hp <= 0) { pl.hp = 0; pl.alive = false; }
           try { onHit?.(pl, pr); } catch { /* ignore */ }
           if (pr.kind === 'grenade' || pr.kind === 'rpg') {

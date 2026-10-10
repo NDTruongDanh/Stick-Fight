@@ -1,6 +1,8 @@
+import fs from "node:fs";
 import os from "node:os";
 import { HostServer } from "./HostServer.js";
 import { DEFAULT_PORT } from "../shared/constants.js";
+import type { LevelDef } from "../shared/types.js";
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -28,12 +30,37 @@ const port = Number(arg("port", String(DEFAULT_PORT))) || DEFAULT_PORT;
 const levelId = arg("level", "woods1");
 const winsTarget = Number(arg("wins", "5")) || 5;
 const botCount = Math.max(0, Number(arg("bots", "0")) || 0);
+const levelFile = arg("level-file", "");
 
-const server = new HostServer(port, levelId, winsTarget, botCount);
+// Custom editor map: loose validation (object with spawns + weaponDrops).
+// Full validation happens client-side via editor validateLevel.
+let customLevel: LevelDef | null = null;
+if (levelFile) {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(levelFile, "utf8"));
+    const rec = parsed as Record<string, unknown>;
+    const ok =
+      typeof parsed === "object" && parsed !== null &&
+      Array.isArray(rec.spawns) && rec.spawns.length > 0 &&
+      Array.isArray(rec.weaponDrops) && rec.weaponDrops.length > 0;
+    if (!ok) {
+      console.error(`[host] --level-file ${levelFile}: missing spawns/weaponDrops — falling back to --level ${levelId}`);
+    } else {
+      customLevel = parsed as LevelDef;
+    }
+  } catch (err) {
+    console.error(`[host] --level-file ${levelFile}: ${(err as Error).message} — falling back to --level ${levelId}`);
+  }
+}
+
+const server = new HostServer(port, levelId, winsTarget, botCount, customLevel);
 server.start();
 
 console.log("=== Stick Fight LAN host ===");
-console.log(`level: ${levelId} · first to ${winsTarget} · bots: ${botCount}`);
+if (customLevel) {
+  console.log(`custom level: ${customLevel.name || levelFile}`);
+}
+console.log(`level: ${customLevel ? customLevel.id : levelId} · first to ${winsTarget} · bots: ${botCount}`);
 for (const { addr, internal } of lanIPs()) {
   console.log(`  ws://${addr}:${port}${internal ? "  (this machine)" : "  <-- give this to friends"}`);
 }

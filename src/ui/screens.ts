@@ -334,6 +334,16 @@ export class Ui {
             ? `<div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
                  Friends join at <span class="font-mono text-green-300">ws://${esc(lanHint())}:8080</span><br />
                  <span class="text-neutral-400">On the host PC first run <span class="font-mono text-green-300">npm run host</span>, then press START below.</span>
+               </div>
+               <div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
+                 <span class="font-bold text-neutral-200">Custom map (optional)</span><br />
+                 <span class="text-neutral-400">Pick an editor JSON file to validate it here, then start the server with
+                 <span class="font-mono text-green-300">npm run host -- --level-file &lt;file&gt;</span>.
+                 Joining players receive the map automatically. (The browser cannot inject a file
+                 into the server process — the CLI flag is required.)</span>
+                 <input id="s-custom-file" type="file" accept=".json,application/json"
+                   class="mt-2 block w-full text-[12px] text-neutral-400 file:mr-2 file:px-3 file:py-1 file:rounded file:border file:border-neutral-900 file:bg-neutral-700 file:text-neutral-100" />
+                 <span id="s-custom-status" class="block mt-1 text-neutral-500"></span>
                </div>`
             : ''
         }
@@ -351,6 +361,43 @@ export class Ui {
     const ip = this.screen.querySelector<HTMLInputElement>('#s-ip');
     const ipErr = this.screen.querySelector<HTMLElement>('#s-ip-err');
     name?.select();
+    // Host-only custom-map picker: validates a level JSON file locally and
+    // stages it for copy-paste. The browser cannot feed it to the node server
+    // process — the host must pass it via --level-file (see instructions).
+    const customFile = this.screen.querySelector<HTMLInputElement>('#s-custom-file');
+    const customStatus = this.screen.querySelector<HTMLElement>('#s-custom-status');
+    if (customFile && customStatus) {
+      try {
+        const stagedName = localStorage.getItem('sf_host_custom_name');
+        if (stagedName && localStorage.getItem('sf_host_custom')) {
+          customStatus.textContent = `custom map ready — start server with --level-file ${stagedName}`;
+          customStatus.className = 'block mt-1 text-green-300';
+        }
+      } catch {
+        /* storage unavailable — ignore */
+      }
+      customFile.addEventListener('change', () => {
+        const f = customFile.files?.[0];
+        if (!f) return;
+        void f.text().then((text) => {
+          try {
+            importLevel(text); // full editor validation
+            try {
+              localStorage.setItem('sf_host_custom', text);
+              localStorage.setItem('sf_host_custom_name', f.name);
+            } catch {
+              /* storage unavailable — validation result still shown */
+            }
+            customStatus.textContent = `custom map ready — start server with --level-file ${f.name}`;
+            customStatus.className = 'block mt-1 text-green-300';
+            this.toast('Custom map validated — pass it to the server via --level-file');
+          } catch (err) {
+            customStatus.textContent = err instanceof Error ? err.message.split('\n')[0] : String(err);
+            customStatus.className = 'block mt-1 text-red-300';
+          }
+        });
+      });
+    }
     const go = () => {
       const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
       if (opts.ip) {

@@ -33,25 +33,38 @@ export class HostServer {
   private started = false;
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private seed = (Math.random() * 2 ** 31) | 0;
+  private customJson: string | null = null;
 
   constructor(
     private port: number,
     private levelId: string,
     private winsTarget = 5,
     private botCount = 0,
+    customLevel?: LevelDef | null,
   ) {
-    const level = LEVELS.find((l) => l.id === levelId) ?? LEVELS[0];
-    this.match = new Match(level, { cycle: [...LEVELS], winsTarget: this.winsTarget });
+    if (customLevel) {
+      this.customJson = JSON.stringify(customLevel);
+      this.match = new Match(customLevel, {
+        cycle: [customLevel, ...LEVELS.filter((l) => l.id !== customLevel.id)],
+        winsTarget: this.winsTarget,
+      });
+    } else {
+      const level = LEVELS.find((l) => l.id === levelId) ?? LEVELS[0];
+      this.match = new Match(level, { cycle: [...LEVELS], winsTarget: this.winsTarget });
+    }
     this.addInitialBots(botCount);
   }
 
   start(): void {
     // Upgrade to the real level pack if another module provides it (non-blocking).
-    void resolveLevel(this.levelId).then((lv) => {
-      if (lv && this.wss) {
-        this.match.level = lv;
-      }
-    });
+    // Skipped for custom levels: the JSON def is already authoritative.
+    if (!this.customJson) {
+      void resolveLevel(this.levelId).then((lv) => {
+        if (lv && this.wss) {
+          this.match.level = lv;
+        }
+      });
+    }
 
     this.wss = new WebSocketServer({ port: this.port });
     this.wss.on("connection", (ws) => this.onConnect(ws));
@@ -242,6 +255,7 @@ export class HostServer {
       this.startTimer = null;
     }
     const msg: ServerMsg = { v: PROTOCOL_VERSION, t: "start", levelId: this.match.level.id, seed: this.seed };
+    if (this.customJson) msg.levelJson = this.customJson;
     for (const c of this.clients.values()) send(c.ws, msg);
     this.chat("server", forced ? "match started by host" : "match started!");
   }
@@ -272,6 +286,7 @@ export class HostServer {
       drops: this.match.drops,
       events,
     };
+    if (this.customJson) msg.levelJson = this.customJson;
     const raw = JSON.stringify(msg);
     for (const c of this.clients.values()) {
       if (c.ws.readyState === WebSocket.OPEN) c.ws.send(raw);

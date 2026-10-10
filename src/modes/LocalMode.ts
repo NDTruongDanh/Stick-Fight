@@ -13,11 +13,11 @@ import type { HudState } from '../ui/hud.js';
 import { LEVELS } from '../levels/levels.js';
 import { WEAPONS } from '../weapons/defs.js';
 import { Sfx } from '../core/audio.js';
-import { drawBackground, drawSnakes } from '../entities/props.js';
+import { drawBackground, drawSnakes, drawFrostOverlay, drawGlueOverlay, drawIceGlue } from '../entities/props.js';
 import { drawStick } from '../entities/stick.js';
 
 // All 18 minus fists, plus rare snake guns (weighted rare in spawnDrop).
-const GUN_POOL: WeaponId[] = ['pistol', 'revolver', 'deagle', 'uzi', 'ak47', 'm16', 'sniper', 'shotgun', 'sawedoff', 'bouncer', 'minigun', 'grenade', 'rpg', 'flamethrower', 'sword', 'spear', 'laser', 'snake', 'snakeshot'];
+const GUN_POOL: WeaponId[] = ['pistol', 'revolver', 'deagle', 'uzi', 'ak47', 'm16', 'sniper', 'shotgun', 'sawedoff', 'bouncer', 'minigun', 'grenade', 'rpg', 'flamethrower', 'sword', 'spear', 'laser', 'ice', 'glue', 'snake', 'snakeshot'];
 const RARE_SET: ReadonlySet<WeaponId> = new Set<WeaponId>(['snake', 'snakeshot']);
 const COMMON_POOL: WeaponId[] = GUN_POOL.filter((w) => !RARE_SET.has(w));
 const RARE_POOL: WeaponId[] = GUN_POOL.filter((w) => RARE_SET.has(w));
@@ -34,6 +34,8 @@ const TUNE: Record<WeaponId, Tune> = {
   sword: {}, spear: {}, laser: {},
   snake: { life: 6, grav: 0 },
   snakeshot: { life: 6, grav: 0 },
+  ice: { life: 1.2, grav: 0.5 },
+  glue: { life: 1.5, grav: 0.375 },
 };
 
 const THROW_DAMAGE = 55;
@@ -44,7 +46,7 @@ const BURN_TIME = 1.2;
 const isInfinite = (w: WeaponId): boolean => WEAPONS[w].magSize >= 9000;
 const fullAmmo = (w: WeaponId): number => (isInfinite(w) ? -1 : WEAPONS[w].magSize);
 
-interface R { id: number; name: string; color: string; x: number; y: number; vx: number; vy: number; hp: number; alive: boolean; weapon: WeaponId; ammo: number; cd: number; face: 1 | -1; ax: number; ay: number; onGround: boolean; wins: number; bot: boolean; walk: number; flash: number; swing: number; block: boolean; dropT: number; fireHeld: boolean; prevFire: boolean; ground: string; st: number; burnT: number; invuln: number; squash: number; deadT: number; muzzle: number; boss: boolean; maxHp: number; stompCd: number }
+interface R { id: number; name: string; color: string; x: number; y: number; vx: number; vy: number; hp: number; alive: boolean; weapon: WeaponId; ammo: number; cd: number; face: 1 | -1; ax: number; ay: number; onGround: boolean; wins: number; bot: boolean; walk: number; flash: number; swing: number; block: boolean; dropT: number; fireHeld: boolean; prevFire: boolean; ground: string; st: number; burnT: number; invuln: number; squash: number; deadT: number; muzzle: number; boss: boolean; maxHp: number; stompCd: number; frostT: number; glueT: number }
 interface Proj { x: number; y: number; vx: number; vy: number; life: number; owner: number; kind: WeaponId | 'thrown'; dmg: number; fuse: number; explosive: number; grav: number; bounces: number; thrownW?: WeaponId; ammo?: number }
 interface Solid { x: number; y: number; w: number; h: number; type: string; belt?: number }
 interface Part { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number }
@@ -90,7 +92,7 @@ export class LocalMode {
     const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('no 2d context'); this.ctx = ctx; let seed = 12345; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647; this.deco = Array.from({ length: 70 }, () => ({ x: rnd() * W, y: rnd() * H * 0.7, s: 1 + rnd() * 3 }));
     const total = Math.min(4, Math.max(1, opts.humans + opts.bots));
     const nH = Math.min(opts.humans, 2);
-    for (let i = 0; i < total; i++) this.players.push({ id: i, name: i === 0 && opts.humans > 0 ? 'YOU' : PLAYER_NAMES[i], color: PLAYER_COLORS[i], x: 0, y: 0, vx: 0, vy: 0, hp: PLAYER_HP, alive: true, weapon: 'fists', ammo: -1, cd: 0, face: i % 2 === 0 ? 1 : -1, ax: 0, ay: 0, onGround: false, wins: 0, bot: i >= nH, walk: 0, flash: 0, swing: 0, block: false, dropT: 0, fireHeld: false, prevFire: false, ground: '', st: 0, burnT: 0, invuln: 0, squash: 0, deadT: 0, muzzle: 0, boss: false, maxHp: PLAYER_HP, stompCd: 0 });
+    for (let i = 0; i < total; i++) this.players.push({ id: i, name: i === 0 && opts.humans > 0 ? 'YOU' : PLAYER_NAMES[i], color: PLAYER_COLORS[i], x: 0, y: 0, vx: 0, vy: 0, hp: PLAYER_HP, alive: true, weapon: 'fists', ammo: -1, cd: 0, face: i % 2 === 0 ? 1 : -1, ax: 0, ay: 0, onGround: false, wins: 0, bot: i >= nH, walk: 0, flash: 0, swing: 0, block: false, dropT: 0, fireHeld: false, prevFire: false, ground: '', st: 0, burnT: 0, invuln: 0, squash: 0, deadT: 0, muzzle: 0, boss: false, maxHp: PLAYER_HP, stompCd: 0, frostT: 0, glueT: 0 });
     // Custom editor level (trusted editor output) goes first in the rotation.
     if (opts.customLevel) {
       this.rotation = [{ ...opts.customLevel, id: 'custom' }, ...LEVELS];
@@ -209,7 +211,7 @@ export class LocalMode {
         const insideY = p.y > pl.y && p.y - 68 < pl.y + pl.h;
         if (insideX && insideY) p.y = pl.y; // stand on top instead of stuck inside
       }
-      p.vx = 0; p.vy = 0; p.hp = p.boss ? BOSS_HP : PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = ''; p.stompCd = 0;
+      p.vx = 0; p.vy = 0; p.hp = p.boss ? BOSS_HP : PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = ''; p.stompCd = 0; p.frostT = 0; p.glueT = 0;
     });
     this.projs = []; this.fuses = []; this.drops = []; this.beams = []; this.dropRespawn = [];
     this.crates = (lv.crates ?? []).map((c) => ({ x: c.x * W, y: c.y * H, w: c.w * W, h: c.h * H, vy: 0 })); this.barrels = (lv.barrels ?? []).map((b) => ({ x: b.x * W, y: b.y * H, hp: 30 }));
@@ -303,7 +305,7 @@ export class LocalMode {
       else this.sfx.hit();
       return;
     }
-    v.alive = false; v.hp = 0; v.deadT = 0;
+    v.alive = false; v.hp = 0; v.deadT = 0; v.frostT = 0; v.glueT = 0;
     this.sfx.die();
     if (v.weapon !== 'fists') this.drops.push({ x: v.x, y: v.y - 40, vx: (Math.random() - 0.5) * 200, vy: -200, weapon: v.weapon, ammo: v.ammo });
     this.burst(v.x, v.y - 34, 22, v.color); this.shake = Math.max(this.shake, 0.35);
@@ -652,6 +654,9 @@ export class LocalMode {
         if (Math.random() < 0.35) this.parts.push({ x: p.x + (Math.random() - 0.5) * 20, y: p.y - 20 - Math.random() * 30, vx: 0, vy: -120, life: 0.3, max: 0.3, color: '#fb923c', size: 3 });
         if (p.hp <= 0) this.hurt(p, 1, 0, -100, p.id, 'burn');
       }
+      // Status timers: frost slows, glue roots. Cleared on death/spawn.
+      if (p.frostT > 0) p.frostT = Math.max(0, p.frostT - dt);
+      if (p.glueT > 0) p.glueT = Math.max(0, p.glueT - dt);
       let L = false, Rr = false, J = false, D = false, F = false, B = false, T = false;
       if (p.bot) { const c = this.botInput(p, dt); L = c.l; Rr = c.r; J = c.j; F = c.fire; B = c.blk; D = c.d; }
       else {
@@ -662,16 +667,22 @@ export class LocalMode {
       }
       if (T && !p.prevFire) this.throwGun(p);
       p.prevFire = T; p.block = B;
-      const dir = (Rr ? 1 : 0) - (L ? 1 : 0);
+      const glued = p.glueT > 0 && p.alive;
+      const frosted = p.frostT > 0 && p.alive;
+      const dir = glued ? 0 : (Rr ? 1 : 0) - (L ? 1 : 0);
       if (dir !== 0) p.face = dir > 0 ? 1 : -1;
-      const spdMult = p.boss ? BOSS_SPEED_MULT : 1;
-      if (dir !== 0) p.vx += dir * MOVE_SPEED * spdMult * 4 * (p.onGround ? 1 : 0.65) * dt;
+      const spdMult = (p.boss ? BOSS_SPEED_MULT : 1) * (frosted ? 0.5 : 1);
+      if (glued) {
+        // Rooted: no accel, strong friction (can still fire/block).
+        p.vx *= Math.pow(0.7, dt * 60);
+        if (Math.abs(p.vx) < 4) p.vx = 0;
+      } else if (dir !== 0) p.vx += dir * MOVE_SPEED * spdMult * 4 * (p.onGround ? 1 : 0.65) * dt;
       else p.vx *= p.onGround ? Math.pow(p.ground === 'ice' ? 0.94 : 0.8, dt * 60) : 0.995;
       p.vx = Math.max(-MOVE_SPEED * spdMult, Math.min(MOVE_SPEED * spdMult, p.vx));
       if (p.ground === 'conveyor') { const s = solids.find((q) => q.type === 'conveyor'); if (s?.belt) p.vx += s.belt * W * dt; }
       const wasGround = p.onGround;
       const fallSpeed = p.vy;
-      if (J && (p.onGround || this.onProp(p))) { p.vy = -JUMP_SPEED; p.onGround = false; this.sfx.jump(); }
+      if (!glued && J && (p.onGround || this.onProp(p))) { p.vy = -JUMP_SPEED * (frosted ? 0.8 : 1); p.onGround = false; this.sfx.jump(); }
       if (D) p.dropT = 0.25; else p.dropT = Math.max(0, p.dropT - dt);
       p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
       p.x += p.vx * dt;
@@ -740,6 +751,8 @@ export class LocalMode {
         else {
           this.hurt(e, pr.dmg, pr.vx * 0.28, -120, pr.owner, String(pr.kind), head);
           if (pr.kind === 'flamethrower') { e.burnT = BURN_TIME; this.burst(pr.x, pr.y, 3, '#fb923c', 160); }
+          else if (pr.kind === 'ice') { e.frostT = 2; this.burst(pr.x, pr.y, 6, '#7dd3fc', 180); }
+          else if (pr.kind === 'glue') { e.glueT = Math.min(3, e.glueT + 1); this.burst(pr.x, pr.y, 6, '#d6a85c', 160); }
         }
         pr.life = 0; break;
       }
@@ -929,6 +942,7 @@ export class LocalMode {
     }
     for (const pr of this.projs) {
       if (pr.kind === 'snake' || pr.kind === 'snakeshot') continue;
+      if (pr.kind === 'ice' || pr.kind === 'glue') continue; // drawn by drawIceGlue below
       if (pr.kind === 'grenade') { c.fillStyle = pr.fuse < 0.5 ? '#ef4444' : '#1f2937'; c.beginPath(); c.arc(pr.x, pr.y, 7, 0, Math.PI * 2); c.fill(); }
       else if (pr.kind === 'thrown') { c.save(); c.translate(pr.x, pr.y); c.rotate(this.time * 12); c.fillStyle = '#e5e7eb'; c.fillRect(-12, -3, 24, 6); c.restore(); }
       else if (pr.kind === 'flamethrower') { c.fillStyle = Math.random() < 0.5 ? '#fb923c' : '#fbbf24'; c.beginPath(); c.arc(pr.x, pr.y, 5 + Math.random() * 3, 0, Math.PI * 2); c.fill(); }
@@ -937,7 +951,13 @@ export class LocalMode {
       else { c.strokeStyle = '#fef08a'; c.lineWidth = 3; c.beginPath(); c.moveTo(pr.x, pr.y); c.lineTo(pr.x - pr.vx * 0.018, pr.y - pr.vy * 0.018); c.stroke(); }
     }
     drawSnakes(c, this.projs, this.time);
-    for (const p of this.players) this.stick(p);
+    drawIceGlue(c, this.projs, this.time);
+    for (const p of this.players) {
+      this.stick(p);
+      if (!p.alive) continue;
+      if (p.frostT > 0) drawFrostOverlay(c, p.x, p.y, this.time);
+      if (p.glueT > 0) drawGlueOverlay(c, p.x, p.y, this.time);
+    }
     for (const q of this.parts) { c.globalAlpha = Math.max(0, q.life / q.max); c.fillStyle = q.color; c.fillRect(q.x - q.size / 2, q.y - q.size / 2, q.size, q.size); }
     c.globalAlpha = 1;
     if (this.bannerT > 0 && this.banner) {

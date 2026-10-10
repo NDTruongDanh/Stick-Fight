@@ -134,4 +134,16 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     projectileSpeed: 260, spread: 0.12, recoil: 850,
     knockback: 300, auto: false, pellets: 3,
   }),
+  ice: d({
+    id: 'ice', name: 'Ice Gun',
+    damage: 8, fireInterval: 0.22, magSize: 40,
+    projectileSpeed: 700, spread: 0.03, recoil: 180,
+    knockback: 200, auto: true,
+  }),
+  glue: d({
+    id: 'glue', name: 'Glue Gun',
+    damage: 5, fireInterval: 0.25, magSize: 40,
+    projectileSpeed: 650, spread: 0.04, recoil: 160,
+    knockback: 180, auto: true,
+  }),
 };

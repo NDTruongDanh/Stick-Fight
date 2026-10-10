@@ -14,6 +14,7 @@ import {
 import type { LevelDef, PlayerState, ProjectileState } from "../../shared/types.js";
 import type { HudState } from "../ui/hud.js";
 import { LEVELS } from "../levels/levels.js";
+import { validateLevel } from "../levels/editor.js";
 import { WEAPONS } from "../weapons/defs.js";
 import { Sfx } from "../core/audio.js";
 import { drawBackground, drawBarrels, drawCrates, drawDrops, drawKillRects, drawSnakes } from "../entities/props.js";
@@ -73,6 +74,9 @@ export class OnlineMode {
   private seq = 0;
   private level: LevelDef = FALLBACK_LEVEL;
   private started = false;
+  /** True when the arena came from the host's custom JSON (LAN --level-file). */
+  private isCustom = false;
+  private lastCustomJson: string | null = null;
   private snaps: { msg: SnapshotMsg; at: number }[] = [];
   private me: PlayerState | null = null; // predicted local copy
   private keys = new Set<string>();
@@ -112,14 +116,24 @@ export class OnlineMode {
     this.canvas.addEventListener("contextmenu", this.onCtxMenu);
 
     await this.net.connect(this.url, this.name);
-    this.level = await resolveLevel(this.net.levelId || FALLBACK_LEVEL.id);
+    if (this.net.customLevel && this.applyCustomLevel(this.net.customLevel)) {
+      this.banner = `${this.level.name} · CUSTOM`;
+      this.bannerT = 2;
+    } else {
+      this.level = await resolveLevel(this.net.levelId || FALLBACK_LEVEL.id);
+    }
 
     this.net.onSnapshot = (s) => this.onSnapshot(s);
-    this.net.onStart = () => {
+    this.net.onStart = (s) => {
       this.started = true;
-      void resolveLevel(this.net.levelId).then((lv) => {
-        this.level = lv;
-      });
+      if (s.levelJson && this.applyCustomLevel(s.levelJson)) {
+        this.banner = `${this.level.name} · CUSTOM — ROUND 1`;
+        this.bannerT = 2;
+      } else {
+        void resolveLevel(this.net.levelId).then((lv) => {
+          this.level = lv;
+        });
+      }
       this.pushFeed("match started!");
     };
     this.net.onRoster = (r) => {
@@ -165,6 +179,28 @@ export class OnlineMode {
 
   get ping(): number {
     return this.net.pingMs;
+  }
+
+  /**
+   * Adopt a host-provided custom level (LAN --level-file). Validates with the
+   * editor's full validator; returns true when the custom level is active.
+   * Skips re-parsing when the JSON is unchanged (snapshots repeat it).
+   */
+  private applyCustomLevel(raw: string): boolean {
+    if (raw === this.lastCustomJson) return this.isCustom;
+    this.lastCustomJson = raw;
+    try {
+      const res = validateLevel(JSON.parse(raw) as unknown);
+      if (res.ok && res.level) {
+        this.level = res.level;
+        this.isCustom = true;
+        return true;
+      }
+    } catch {
+      /* malformed JSON — keep the current level */
+    }
+    this.isCustom = false;
+    return false;
   }
 
   // ---- input ----
@@ -302,11 +338,15 @@ export class OnlineMode {
     }
     // Round banner fallback: snapshots carry round/levelId even when the
     // round event arrived before we connected.
-    if (s.levelId && s.levelId !== this.level.id) {
+    if (s.levelJson) {
+      this.applyCustomLevel(s.levelJson);
+    } else if (s.levelId && s.levelId !== this.level.id) {
+      this.isCustom = false;
+      this.lastCustomJson = null;
       this.level = LEVELS.find((l) => l.id === s.levelId) ?? LEVELS[0] ?? FALLBACK_LEVEL;
     }
     if (this.bannerT <= 0 && this.banner === "" && s.round >= 1) {
-      this.banner = `${this.level.name} — ROUND ${s.round}`;
+      this.banner = `${this.level.name}${this.isCustom ? " · CUSTOM" : ""} — ROUND ${s.round}`;
       this.bannerT = 2;
     }
     this.snaps.push({ msg: s, at: performance.now() });
@@ -716,7 +756,7 @@ export class OnlineMode {
         weapon: p.weapon,
       })),
       round: snap?.round ?? 1,
-      levelName: `${this.level.name} · ONLINE`,
+      levelName: `${this.level.name}${this.isCustom ? " · CUSTOM" : ""} · ONLINE`,
       ping: this.net.pingMs,
       killfeed: [...this.feed],
     };

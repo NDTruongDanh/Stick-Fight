@@ -178,6 +178,90 @@ export function drawSnakes(
   }
 }
 
+/** Light-blue frost tint for iced players (feet-based x/yFeet, 68px body). */
+export function drawFrostOverlay(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  yFeet: number,
+  time = 0,
+): void {
+  ctx.save();
+  ctx.globalAlpha = 0.45 + Math.sin(time * 6) * 0.08;
+  ctx.fillStyle = '#7dd3fc';
+  ctx.fillRect(x - 13, yFeet - 68, 26, 68);
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = '#e0f2fe';
+  // Ice crystals: a few sparkles around the torso.
+  const spots: [number, number][] = [[-9, -58], [8, -48], [-4, -30], [10, -22]];
+  for (let i = 0; i < spots.length; i++) {
+    const [ox, oy] = spots[i];
+    const tw = 1.5 + Math.sin(time * 8 + i * 1.7) * 0.7;
+    ctx.fillRect(x + ox - tw / 2, yFeet + oy - tw / 2, tw + 1.5, tw + 1.5);
+  }
+  ctx.restore();
+}
+
+/** Tan glue blobs stuck on a rooted player (feet-based x/yFeet). */
+export function drawGlueOverlay(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  yFeet: number,
+  _time = 0,
+): void {
+  ctx.save();
+  ctx.fillStyle = '#d6a85c';
+  const blobs: [number, number, number][] = [
+    [-12, -8, 7], [10, -6, 6], [-6, -34, 5.5], [9, -44, 5], [0, -60, 4.5],
+  ];
+  for (const [ox, oy, r] of blobs) {
+    ctx.beginPath();
+    ctx.arc(x + ox, yFeet + oy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#a16207';
+  ctx.fillRect(x - 14, yFeet - 6, 28, 5);
+  ctx.restore();
+}
+
+/** In-flight ice droplets (light-blue) + glue blobs (tan). */
+export function drawIceGlue(
+  ctx: CanvasRenderingContext2D,
+  projs: { x: number; y: number; vx: number; vy: number; kind: string }[],
+  time = 0,
+): void {
+  for (const p of projs ?? []) {
+    if (p.kind === 'ice') {
+      ctx.save();
+      ctx.fillStyle = '#7dd3fc';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(224,242,254,0.95)';
+      ctx.beginPath();
+      ctx.arc(p.x - 1.5 + Math.sin(time * 10 + p.x) * 0.8, p.y - 1.5, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else if (p.kind === 'glue') {
+      ctx.save();
+      ctx.fillStyle = '#d6a85c';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fde68a';
+      ctx.beginPath();
+      ctx.arc(p.x - 2, p.y - 2, 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Drip tail.
+      ctx.strokeStyle = '#d6a85c';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
 function toPixels(r: KillRectDef): { x: number; y: number; w: number; h: number } {
   // Level defs are normalized 0..1; runtime may already be pixels.
   if (r.x <= 1.5 && r.y <= 1.5 && r.w <= 1.5 && r.h <= 1.5) {

@@ -117,6 +117,8 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
     laser: { life: 1.6 },
     snake: { life: 6 },
     snakeshot: { life: 6 },
+    ice: { life: 1.2, gravity: 1200 },
+    glue: { life: 1.5, gravity: 900 },
   };
   const out = {} as Record<WeaponId, GunDef>;
   (Object.keys(CANON_WEAPONS) as WeaponId[]).forEach((id) => {
@@ -146,7 +148,7 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
 const DROP_CYCLE: WeaponId[] = [
   "pistol", "shotgun", "uzi", "ak47", "sniper", "revolver", "deagle",
   "grenade", "rpg", "sword", "spear", "minigun", "laser", "bouncer",
-  "sawedoff", "flamethrower", "m16", "snake", "snakeshot",
+  "sawedoff", "flamethrower", "m16", "ice", "glue", "snake", "snakeshot",
 ];
 const DROP_COMMON: WeaponId[] = DROP_CYCLE.filter((w) => w !== "snake" && w !== "snakeshot");
 const DROP_RARE: WeaponId[] = ["snake", "snakeshot"];
@@ -186,6 +188,8 @@ export class Match {
   private dropRespawns: number[] = [];
   private burns = new Map<number, number>();
   private burnOwners = new Map<number, number>();
+  private frosts = new Map<number, number>();
+  private glues = new Map<number, number>();
   private resetTimer = -1;
   private prevJump = new Map<number, boolean>();
   private prevThrow = new Map<number, boolean>();
@@ -229,6 +233,10 @@ export class Match {
     this.blocking.delete(id);
     this.stompCd.delete(id);
     this.lastPickup.delete(id);
+    this.burns.delete(id);
+    this.burnOwners.delete(id);
+    this.frosts.delete(id);
+    this.glues.delete(id);
     if (this.bossId === id) this.bossId = null;
   }
 
@@ -279,6 +287,15 @@ export class Match {
         else this.burns.set(p.id, bt - dt);
         this.damage(p, 5 * dt, this.burnOwners.get(p.id) ?? p.id, 0, 0, "burn");
       }
+    }
+    // Status timers tick down (frost 2s slow, glue stacking root max 3s).
+    for (const [id, t] of this.frosts) {
+      if (t - dt <= 0) this.frosts.delete(id);
+      else this.frosts.set(id, t - dt);
+    }
+    for (const [id, t] of this.glues) {
+      if (t - dt <= 0) this.glues.delete(id);
+      else this.glues.set(id, t - dt);
     }
 
     // Players
@@ -343,6 +360,8 @@ export class Match {
     this.dropTimer = 2;
     this.burns.clear();
     this.burnOwners.clear();
+    this.frosts.clear();
+    this.glues.clear();
     this.bossTime = 0;
     this.bossId = null;
     this.stompCd.clear();
@@ -446,16 +465,22 @@ export class Match {
   }
 
   private movePlayer(p: PlayerState, inp: MatchInput, dt: number): void {
-    const dir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    const glued = (this.glues.get(p.id) ?? 0) > 0;
+    const frosted = (this.frosts.get(p.id) ?? 0) > 0;
+    const rawDir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    // Glued players cannot move (can still aim/fire/block).
+    const dir = glued ? 0 : rawDir;
     if (dir !== 0) p.facing = dir;
     const accel = p.onGround ? 1 : AIR_CONTROL;
-    const target = dir * MOVE_SPEED * (p.boss ? BOSS_SPEED_MULT : 1);
+    const speedMult = (p.boss ? BOSS_SPEED_MULT : 1) * (frosted ? 0.5 : 1);
+    const target = dir * MOVE_SPEED * speedMult;
     p.vx += (target - p.vx) * Math.min(1, (p.onGround ? 14 : 7) * accel * dt);
+    if (glued && p.onGround) p.vx *= 1 - Math.min(1, 8 * dt);
     p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
     const wasGround = p.onGround;
     const prevJump = this.prevJump.get(p.id) ?? false;
-    if (inp.jump && !prevJump && (p.onGround || this.propTop(p))) {
-      p.vy = -JUMP_SPEED;
+    if (!glued && inp.jump && !prevJump && (p.onGround || this.propTop(p))) {
+      p.vy = -JUMP_SPEED * (frosted ? 0.8 : 1);
       p.onGround = false;
     }
     void wasGround;
@@ -724,6 +749,10 @@ export class Match {
     if (q.hp <= 0) {
       q.hp = 0;
       q.alive = false;
+      this.frosts.delete(q.id);
+      this.glues.delete(q.id);
+      this.burns.delete(q.id);
+      this.burnOwners.delete(q.id);
       const killer = this.players.find((p) => p.id === fromId);
       if (killer && killer.id !== q.id) {
         killer.kills++;
@@ -846,6 +875,10 @@ export class Match {
             else if (String(pr.kind) === "flamethrower") {
               this.burns.set(q.id, 1.2);
               this.burnOwners.set(q.id, pr.owner);
+            } else if (String(pr.kind) === "ice") {
+              this.frosts.set(q.id, 2);
+            } else if (String(pr.kind) === "glue") {
+              this.glues.set(q.id, Math.min(3, (this.glues.get(q.id) ?? 0) + 1));
             }
             dead = true;
             break;

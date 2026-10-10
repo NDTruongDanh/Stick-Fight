@@ -25,6 +25,8 @@ export class NetClient {
   slot = -1;
   levelId = "";
   pingMs = 0;
+  /** Raw host-provided custom level JSON (LAN --level-file), if any. */
+  customLevel: string | null = null;
 
   onSnapshot: (s: SnapshotMsg) => void = () => {};
   onRoster: (r: RosterMsg) => void = () => {};
@@ -169,6 +171,7 @@ export class NetClient {
         }
         break;
       case "snapshot":
+        this.customLevel = msg.levelJson ?? null;
         this.onSnapshot(msg);
         break;
       case "roster":
@@ -179,6 +182,7 @@ export class NetClient {
         break;
       case "start":
         this.levelId = msg.levelId;
+        this.customLevel = msg.levelJson ?? null;
         this.onStart(msg);
         break;
       case "pong":
