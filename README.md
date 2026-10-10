@@ -36,6 +36,56 @@ Match config: the menu has a round-wins stepper (3 / 5 / 10, default 5,
 persisted to `localStorage` key `sf_wins`). First to the target takes the
 match. Every 5th round is a boss round.
 
+### Host flags
+
+```sh
+npm run host -- --port 8080 --level woods1 --wins 5 --bots 1
+```
+
+| Flag      | Default | Description                                    |
+| --------- | ------- | ---------------------------------------------- |
+| `--port`  | `8080`  | WS port the host server listens on             |
+| `--level` | `woods1`| Starting arena id                              |
+| `--wins`  | `5`     | Round wins needed to take the match            |
+| `--bots`  | `0`     | Prefilled bot fighters (clamped to max 4 total; `Match` still tops up to a minimum of 2 fighters) |
+
+`--flag value` and `--flag=value` forms both work. Extra bots are trimmed
+as humans join so humans + bots never exceed 4 fighters.
+
+### Docker LAN host
+
+The image builds the web client and runs the host server on `:8080`.
+The client (`dist/`) is served separately.
+
+```sh
+npm run docker:build
+npm run docker:host
+# or: docker compose up
+```
+
+Then serve the client on the host machine (or any static host):
+
+```sh
+npm run build
+npm run preview -- --host   # serves dist/ on :4173, LAN-reachable
+```
+
+Friends open `http://<host-ip>:4173` and JOIN `ws://<host-ip>:8080`.
+
+Firewall note: allow inbound TCP on `8080` (game server) and `4173`
+(client preview) on the host machine — Windows Defender Firewall (and any
+third-party firewall) must allow them for the current network profile.
+
+### Troubleshooting
+
+- **Port in use** (`EADDRINUSE` on 8080): another host is already running —
+  stop it, or pick a free port: `npm run host -- --port 8081` (compose maps
+  `8080:8080`, so adjust the mapping for Docker).
+- **Friends can't connect**: confirm everyone is on the same network
+  (same Wi-Fi / SSID, no guest isolation or client-AP isolation on the
+  router), the join URL uses the host's LAN IP (not `localhost`), and the
+  firewall rules above are in place. `ping <host-ip>` is a quick check.
+
 ## Controls
 
 | Input        | Action                    |
@@ -82,5 +132,5 @@ P2 uses auto-aim at the nearest enemy. Extra local humans beyond 2 become bots.
 - Online: player skins, rematch voting, chat, reconnection
 - Sound effects + music, screen-shake tuning, particle polish
 - Mobile / touch controls
-- Docker image for one-command LAN hosting
+- Docker image for one-command LAN hosting (see Docker LAN host section)
 - More weapons, boss variety, and level hazards

@@ -515,7 +515,33 @@ export class OnlineMode {
       for (const p of players) {
         const show = p.id === this.net.clientId && this.me ? this.me : p;
         // Server PlayerState is center-x / top-y; drawStick takes left/top.
-        drawStick(ctx, { ...show, x: show.x - PW / 2 } as PlayerState, time);
+        if (show.boss && show.alive) {
+          // Boss: 1.8x scale around feet + simple crown + BOSS tag.
+          const feetX = show.x, feetY = show.y + PH;
+          ctx.save();
+          ctx.translate(feetX, feetY);
+          ctx.scale(1.8, 1.8);
+          ctx.translate(-feetX, -feetY);
+          drawStick(ctx, { ...show, x: show.x - PW / 2 } as PlayerState, time);
+          ctx.restore();
+          const headY = feetY - 48 * 1.8;
+          ctx.fillStyle = "#facc15";
+          ctx.fillRect(show.x - 13, headY - 20, 26, 10);
+          ctx.beginPath();
+          for (let i = 0; i < 3; i++) {
+            const sx = show.x - 13 + i * 13;
+            ctx.moveTo(sx, headY - 20);
+            ctx.lineTo(sx + 6.5, headY - 28);
+            ctx.lineTo(sx + 13, headY - 20);
+          }
+          ctx.fill();
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 11px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText("BOSS", show.x, headY - 32);
+        } else {
+          drawStick(ctx, { ...show, x: show.x - PW / 2 } as PlayerState, time);
+        }
         // HP bar + name tag (drawStick has no labels).
         this.drawTag(ctx, show);
         const mz = this.muzzle.get(show.id) ?? 0;

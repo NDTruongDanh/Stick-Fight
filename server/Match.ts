@@ -196,6 +196,7 @@ export class Match {
   private bossId: number | null = null;
   private bossTime = 0;
   private stompCd = new Map<number, number>();
+  private lastPickup = new Map<number, number>();
 
   constructor(level: LevelDef, opts?: { cycle?: LevelDef[]; winsTarget?: number }) {
     this.level = level;
@@ -227,6 +228,7 @@ export class Match {
     this.prevThrow.delete(id);
     this.blocking.delete(id);
     this.stompCd.delete(id);
+    this.lastPickup.delete(id);
     if (this.bossId === id) this.bossId = null;
   }
 
@@ -544,6 +546,12 @@ export class Match {
     const def = WEAPONS[p.weapon];
     const [dx, dy] = this.aimDir(p, inp);
     if (def.melee) {
+      // Finite melee (sword/spear 25): broken at 0 -> fists. Fists infinite.
+      if (p.weapon !== "fists" && p.ammo <= 0) {
+        p.weapon = "fists"; p.ammo = 0;
+        this.events.push({ kind: "break", a: p.id });
+        return;
+      }
       p.cooldown = def.melee.interval;
       const cx = p.x, cy = p.y + PH / 2;
       const aimAng = Math.atan2(dy, dx);
@@ -565,6 +573,14 @@ export class Match {
         p.vy += dy * 180;
       }
       this.events.push({ kind: "swing", a: p.id });
+      if (p.weapon !== "fists") {
+        p.ammo--;
+        if (p.ammo <= 0) {
+          const broke = p.weapon;
+          p.weapon = "fists"; p.ammo = 0;
+          this.events.push({ kind: "break", a: p.id, text: broke });
+        }
+      }
       return;
     }
     if (def.beam) {
@@ -585,8 +601,11 @@ export class Match {
     p.ammo--;
     const pellets = def.pellets ?? 1;
     const gx = p.x + dx * 24, gy = p.y + PH / 2 - 6 + dy * 24;
+    // Quickdraw: firing within 0.35s of pickup gets zero spread.
+    const qd = this.time - (this.lastPickup.get(p.id) ?? -10) < 0.35;
+    const effSpread = qd ? 0 : def.spread;
     for (let i = 0; i < pellets; i++) {
-      const a = Math.atan2(dy, dx) + (Math.random() - 0.5) * 2 * def.spread + (pellets > 1 ? (i / (pellets - 1) - 0.5) * 0.35 : 0);
+      const a = Math.atan2(dy, dx) + (Math.random() - 0.5) * 2 * effSpread + (pellets > 1 ? (i / (pellets - 1) - 0.5) * 0.35 : 0);
       const sp = def.speed * (0.92 + Math.random() * 0.16);
       this.projectiles.push({
         id: this.nextProjId++, kind: p.weapon,
@@ -680,6 +699,7 @@ export class Match {
         p.ammo = d.ammo;
         this.drops.splice(i, 1);
         this.events.push({ kind: "pickup", a: p.id, text: d.weapon });
+        this.lastPickup.set(p.id, this.time);
         return;
       }
     }

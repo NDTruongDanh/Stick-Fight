@@ -38,9 +38,11 @@ export class HostServer {
     private port: number,
     private levelId: string,
     private winsTarget = 5,
+    private botCount = 0,
   ) {
     const level = LEVELS.find((l) => l.id === levelId) ?? LEVELS[0];
     this.match = new Match(level, { cycle: [...LEVELS], winsTarget: this.winsTarget });
+    this.addInitialBots(botCount);
   }
 
   start(): void {
@@ -129,6 +131,7 @@ export class HostServer {
           info.helloOk = true;
           clearTimeout(helloTimeout);
           this.match.addPlayer(id, info.name);
+          this.trimBots();
           send(ws, { v: PROTOCOL_VERSION, t: "welcome", clientId: id, slot, levelId: this.match.level.id });
           this.broadcastRoster();
           this.chat("server", `${info.name} joined (${this.clients.size}/${MAX_PLAYERS})`);
@@ -178,6 +181,24 @@ export class HostServer {
     const used = new Set([...this.clients.values()].map((c) => c.slot));
     for (let s = 0; s < MAX_PLAYERS; s++) if (!used.has(s)) return s;
     return 0;
+  }
+
+  /** Prefill bots so small LAN parties start with a full arena. */
+  private addInitialBots(n: number): void {
+    const count = Math.max(0, Math.min(MAX_PLAYERS, Math.floor(n) || 0));
+    for (let i = 0; i < count; i++) {
+      // Negative IDs outside Match's auto-bot range (-1, -2, …).
+      this.match.addPlayer(-1000 - i, `BOT-${i + 1}`, undefined, true);
+    }
+  }
+
+  /** Keep total fighters (humans + bots) within MAX_PLAYERS. */
+  private trimBots(): void {
+    while (this.match.players.length > MAX_PLAYERS) {
+      const bot = this.match.players.find((p) => p.isBot);
+      if (!bot) return;
+      this.match.removePlayer(bot.id);
+    }
   }
 
   private broadcastRoster(): void {

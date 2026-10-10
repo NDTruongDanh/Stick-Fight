@@ -1,0 +1,10 @@
+# LAN host: authoritative WS match server on :8080.
+# Client is NOT served from here — serve `dist/` separately
+# (`npm run preview -- --host` or any static server) and point it
+# at ws://<host-ip>:8080.
+services:
+  stickfight:
+    build: .
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

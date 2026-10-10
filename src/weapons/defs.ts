@@ -44,9 +44,9 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   }),
   m16: d({
     id: 'm16', name: 'M16',
-    damage: 20, fireInterval: 0.1, magSize: 88,
+    damage: 20, fireInterval: 0.28, magSize: 88,
     projectileSpeed: 1700, spread: 0.03, recoil: 200,
-    knockback: 280, auto: true,
+    knockback: 280, auto: true, pellets: 3,
   }),
   sniper: d({
     id: 'sniper', name: 'Sniper',
@@ -104,14 +104,14 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   }),
   sword: d({
     id: 'sword', name: 'Sword',
-    damage: 68, fireInterval: 0.45, magSize: 9999,
+    damage: 68, fireInterval: 0.45, magSize: 25,
     projectileSpeed: 0, spread: 0, recoil: 150,
     knockback: 600, auto: true,
     melee: { range: 75, arc: 1.6, interval: 0.45 },
   }),
   spear: d({
     id: 'spear', name: 'Spear',
-    damage: 20, fireInterval: 0.55, magSize: 9999,
+    damage: 20, fireInterval: 0.55, magSize: 25,
     projectileSpeed: 0, spread: 0, recoil: 150,
     knockback: 650, auto: false,
     melee: { range: 110, arc: 0.9, interval: 0.55 },

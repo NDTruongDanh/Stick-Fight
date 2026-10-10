@@ -10,6 +10,9 @@
     "preview": "vite preview --host",
     "host": "tsx server/index.ts --port 8080",
     "host:dev": "tsx watch server/index.ts --port 8080",
+    "lan": "npm run host",
+    "docker:build": "docker build -t stickfight .",
+    "docker:host": "docker run --rm -p 8080:8080 stickfight",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

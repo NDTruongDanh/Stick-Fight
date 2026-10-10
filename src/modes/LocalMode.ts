@@ -82,6 +82,7 @@ export class LocalMode {
   private deco: { x: number; y: number; s: number }[] = [];
   private bossId: number | null = null;
   private bossTime = 0;
+  private lastPickup = new Map<number, number>();
   private get winScore(): number { return this.opts.winsTarget ?? WIN_SCORE_DEFAULT; }
 
   constructor(private canvas: HTMLCanvasElement, private opts: { humans: number; bots: number; winsTarget?: number }) {
@@ -451,6 +452,8 @@ export class LocalMode {
     const sx = p.x, sy = p.y - 46, aim = Math.atan2(p.ay - sy, p.ax - sx);
     p.face = Math.cos(aim) >= 0 ? 1 : -1;
     if (w.melee) {
+      // Finite melee (sword/spear 25): broken at 0 -> fists. Fists infinite.
+      if (!isInfinite(p.weapon) && p.ammo <= 0) { p.weapon = 'fists'; p.ammo = -1; return; }
       p.swing = 0.18; p.cd = w.melee.interval;
       this.sfx.shoot(p.weapon);
       this.burst(sx + Math.cos(aim) * w.melee.range * 0.7, sy + Math.sin(aim) * w.melee.range * 0.7, 4, '#e5e5e5', 150);
@@ -459,11 +462,19 @@ export class LocalMode {
         const dx = e.x - sx, dy = (e.y - 34) - sy, d = Math.hypot(dx, dy);
         let da = Math.abs(Math.atan2(dy, dx) - aim); if (da > Math.PI) da = 2 * Math.PI - da;
         if (d < w.melee.range + 20 && da < w.melee.arc / 2 + 0.35) this.hurt(e, p.boss ? w.damage * BOSS_MELEE_MULT : w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon, sy < e.y - 51);
-      }
+      };
       // Punch-boost: swinging fists airborne kicks the attacker (mobility).
       if (p.weapon === 'fists' && !p.onGround) {
         p.vx += Math.cos(aim) * 240; p.vy += Math.sin(aim) * 180;
         p.vx = Math.max(-700, Math.min(700, p.vx)); p.vy = Math.max(-900, Math.min(900, p.vy));
+      }
+      if (!isInfinite(p.weapon)) {
+        p.ammo--;
+        if (p.ammo <= 0) {
+          p.weapon = 'fists'; p.ammo = -1;
+          try { this.sfx.block(); } catch { /* silent */ }
+          this.burst(sx, sy, 8, '#e5e7eb', 200);
+        }
       }
       return;
     }
@@ -476,8 +487,11 @@ export class LocalMode {
     const tune = TUNE[p.weapon];
     const n = w.pellets ?? 1;
     const explosiveR = w.explosive?.radius ?? 0;
+    // Quickdraw: firing within 0.35s of pickup gets zero spread.
+    const qd = this.time - (this.lastPickup.get(p.id) ?? -10) < 0.35;
+    const effSpread = qd ? 0 : w.spread;
     for (let i = 0; i < n; i++) {
-      const a = aim + (Math.random() - 0.5) * 2 * w.spread + (n > 1 ? (i / (n - 1) - 0.5) * 0.35 : 0);
+      const a = aim + (Math.random() - 0.5) * 2 * effSpread + (n > 1 ? (i / (n - 1) - 0.5) * 0.35 : 0);
       const sp = w.projectileSpeed * (0.92 + Math.random() * 0.16);
       this.projs.push({
         x: sx + Math.cos(a) * 18, y: sy + Math.sin(a) * 18,
@@ -614,8 +628,8 @@ export class LocalMode {
       if (!g) continue;
       // Re-pickup reloads to a full mag (thrown/empty guns become useful again).
       const fresh = fullAmmo(g.weapon);
-      if (p.weapon === 'fists') { p.weapon = g.weapon; p.ammo = fresh; g.y = H + 999; this.sfx.pickup(); this.burst(p.x, p.y - 40, 6, '#facc15', 200); }
-      else { const tw = p.weapon; p.weapon = g.weapon; p.ammo = fresh; g.weapon = tw; g.ammo = fullAmmo(tw); g.vy = -150; this.sfx.pickup(); }
+      if (p.weapon === 'fists') { p.weapon = g.weapon; p.ammo = fresh; g.y = H + 999; this.sfx.pickup(); this.burst(p.x, p.y - 40, 6, '#facc15', 200); this.lastPickup.set(p.id, this.time); }
+      else { const tw = p.weapon; p.weapon = g.weapon; p.ammo = fresh; g.weapon = tw; g.ammo = fullAmmo(tw); g.vy = -150; this.sfx.pickup(); this.lastPickup.set(p.id, this.time); }
     }
     this.drops = this.drops.filter((g) => g.y < H + 900);
     this.players.forEach((p, idx) => {
