@@ -5,21 +5,21 @@ const SPEEDS: Partial<Record<WeaponId, number>> = {
   pistol: 950, revolver: 1100, deagle: 1250, uzi: 900, ak47: 1050,
   m16: 1100, sniper: 1900, shotgun: 850, sawedoff: 750, bouncer: 800,
   minigun: 950, grenade: 620, rpg: 700, flamethrower: 520, laser: 1500,
-  spear: 900, sword: 0, fists: 0,
+  spear: 900, sword: 0, fists: 0, snake: 260, snakeshot: 260,
 };
 
 const DAMAGE: Partial<Record<WeaponId, number>> = {
   pistol: 12, revolver: 20, deagle: 34, uzi: 8, ak47: 12, m16: 11,
   sniper: 55, shotgun: 8, sawedoff: 9, bouncer: 14, minigun: 7,
   grenade: 45, rpg: 60, flamethrower: 4, laser: 25, spear: 25,
-  sword: 30, fists: 12,
+  sword: 30, fists: 12, snake: 5, snakeshot: 5,
 };
 
 const KNOCK: Partial<Record<WeaponId, number>> = {
   pistol: 220, revolver: 320, deagle: 480, uzi: 160, ak47: 220,
   m16: 220, sniper: 700, shotgun: 420, sawedoff: 520, bouncer: 300,
   minigun: 140, grenade: 650, rpg: 750, flamethrower: 60, laser: 260,
-  spear: 380, sword: 420, fists: 320,
+  spear: 380, sword: 420, fists: 320, snake: 200, snakeshot: 200,
 };
 
 const PW = 26;
@@ -48,6 +48,8 @@ export class Projectiles extends Array<ProjectileState> {
   }
 
   spawn(kind: WeaponId, x: number, y: number, vx: number, vy: number, owner: number, life = 2): ProjectileState {
+    // Snakes live 6s (gravity 0, homing in step()).
+    if ((kind === 'snake' || kind === 'snakeshot') && life === 2) life = 6;
     const p: ProjectileState = {
       id: this.nextId++, kind, x, y, vx, vy, life, owner,
       bounces: kind === 'bouncer' ? 3 : 0,
@@ -70,6 +72,10 @@ export class Projectiles extends Array<ProjectileState> {
       const prevY = pr.y;
 
       if (pr.kind === 'grenade') pr.vy += GRAVITY * dt;
+
+      // Snake homing: steer toward nearest living enemy (not owner),
+      // turn rate limited to ~3 rad/s, speed preserved, gravity 0.
+      if (pr.kind === 'snake' || pr.kind === 'snakeshot') steerSnake(pr, players, dt);
 
       pr.x += pr.vx * dt;
       pr.y += pr.vy * dt;
@@ -140,6 +146,29 @@ export class Projectiles extends Array<ProjectileState> {
       }
     }
   }
+}
+
+function steerSnake(pr: ProjectileState, players: PlayerState[], dt: number): void {
+  let best: PlayerState | null = null;
+  let bd = Infinity;
+  for (const pl of players ?? []) {
+    if (!pl?.alive || pl.id === pr.owner) continue;
+    const d = Math.hypot(pl.x - pr.x, pl.y - pr.y);
+    if (d < bd) { bd = d; best = pl; }
+  }
+  if (!best) return;
+  const speed = Math.hypot(pr.vx, pr.vy) || 260;
+  const cur = Math.atan2(pr.vy, pr.vx);
+  // Aim at victim center (PlayerState is top-based, PH=54).
+  const want = Math.atan2(best.y + 27 - pr.y, best.x + 13 - pr.x);
+  let da = want - cur;
+  while (da > Math.PI) da -= Math.PI * 2;
+  while (da < -Math.PI) da += Math.PI * 2;
+  const maxTurn = 3 * dt;
+  const turn = Math.max(-maxTurn, Math.min(maxTurn, da));
+  const na = cur + turn;
+  pr.vx = Math.cos(na) * speed;
+  pr.vy = Math.sin(na) * speed;
 }
 
 function pointInPlayer(x: number, y: number, p: PlayerState): boolean {

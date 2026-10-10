@@ -122,4 +122,16 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     projectileSpeed: 2000, spread: 0, recoil: 300,
     knockback: 900, auto: true, beam: true,
   }),
+  snake: d({
+    id: 'snake', name: 'Snake',
+    damage: 5, fireInterval: 0.4, magSize: 6,
+    projectileSpeed: 260, spread: 0.02, recoil: 180,
+    knockback: 200, auto: false,
+  }),
+  snakeshot: d({
+    id: 'snakeshot', name: 'Snakeshot',
+    damage: 5, fireInterval: 0.8, magSize: 10,
+    projectileSpeed: 260, spread: 0.12, recoil: 850,
+    knockback: 300, auto: false, pellets: 3,
+  }),
 };

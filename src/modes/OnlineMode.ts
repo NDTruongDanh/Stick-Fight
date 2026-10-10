@@ -11,8 +11,13 @@ import {
   WORLD_H,
   WORLD_W,
 } from "../../shared/constants.js";
-import type { LevelDef, PlayerState } from "../../shared/types.js";
+import type { LevelDef, PlayerState, ProjectileState } from "../../shared/types.js";
+import type { HudState } from "../ui/hud.js";
 import { LEVELS } from "../levels/levels.js";
+import { WEAPONS } from "../weapons/defs.js";
+import { Sfx } from "../core/audio.js";
+import { drawBackground, drawBarrels, drawCrates, drawDrops, drawKillRects, drawSnakes } from "../entities/props.js";
+import { drawStick } from "../entities/stick.js";
 
 const PW = 26;
 const PH = 54;
@@ -33,39 +38,25 @@ const FALLBACK_LEVEL: LevelDef = {
 };
 
 async function resolveLevel(id: string): Promise<LevelDef> {
-  // Canonical pack first (statically bundled: 9 arenas).
-  const canonical = LEVELS.find((l) => l.id === id);
-  if (canonical) return canonical;
-  try {
-    const path = "../levels/index.js"; // legacy level pack if present
-    const mod = (await import(/* @vite-ignore */ path)) as Record<string, unknown>;
-    const pick = (lv: unknown): LevelDef | null =>
-      lv && typeof lv === "object" && "platforms" in (lv as object) && "spawns" in (lv as object)
-        ? (lv as LevelDef)
-        : null;
-    if (typeof mod["getLevel"] === "function") {
-      const lv = pick((mod["getLevel"] as (x: string) => unknown)(id));
-      if (lv) return lv;
-    }
-    const levels = mod["LEVELS"] as unknown;
-    const all: unknown[] = Array.isArray(levels)
-      ? levels
-      : levels && typeof levels === "object"
-        ? Object.values(levels as Record<string, unknown>)
-        : [];
-    for (const l of all) {
-      const p = pick(l);
-      if (p && p.id === id) return p;
-    }
-    for (const l of all) {
-      const p = pick(l);
-      if (p) return p;
-    }
-  } catch {
-    /* use canonical fallback */
-  }
-  return LEVELS[0] ?? FALLBACK_LEVEL;
+  // Canonical pack is statically bundled (9 arenas) — same source of truth
+  // as the host server, so snapshots always resolve to the identical def.
+  return LEVELS.find((l) => l.id === id) ?? LEVELS[0] ?? FALLBACK_LEVEL;
 }
+
+/** Platform fill colors matching LocalMode's PLAT palette. */
+const PLAT_COLORS: Record<string, string> = {
+  ice: "#7dd3fc",
+  bouncy: "#4ade80",
+  conveyor: "#a78bfa",
+  blink: "#f472b6",
+  lava: "#dc2626",
+  mover: "#fb923c",
+  rotator: "#c084fc",
+};
+const WOOD_COLOR = "#8b5a2b";
+
+interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number }
+interface Beam { x1: number; y1: number; x2: number; y2: number; t: number; color: string }
 
 interface KeyState {
   left: boolean; right: boolean; jump: boolean; down: boolean;
@@ -90,6 +81,14 @@ export class OnlineMode {
   private feed: string[] = [];
   private roster: { id: number; name: string; bot: boolean }[] = [];
   private lastFrame = 0;
+  private sfx = new Sfx();
+  private shake = 0;
+  private parts: Particle[] = [];
+  private beams: Beam[] = [];
+  private muzzle = new Map<number, number>();
+  private prevProjIds = new Set<number>();
+  private banner = "";
+  private bannerT = 0;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -103,6 +102,7 @@ export class OnlineMode {
 
   async start(): Promise<void> {
     this.sizeCanvas();
+    this.sfx.ensure();
     window.addEventListener("resize", this.onResize);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
@@ -126,6 +126,10 @@ export class OnlineMode {
       this.roster = r.players;
     };
     this.net.onChat = (c) => this.pushFeed(`${c.from}: ${c.text}`);
+    this.net.onClose = () => {
+      // Auto-reconnect (once) is handled inside NetClient; note it in feed.
+      this.pushFeed("connection lost — retrying…");
+    };
     this.net.onMatchEnd = (wins) => {
       const best = Object.entries(wins).sort((a, b) => b[1] - a[1])[0];
       this.pushFeed(best ? `match won by #${best[0]} (${best[1]})` : "match over");
@@ -247,20 +251,78 @@ export class OnlineMode {
   private onSnapshot(s: SnapshotMsg): void {
     // Surface server killfeed / round flow (causes ride in [brackets]).
     for (const e of s.events ?? []) {
-      if (!e.text) continue;
-      if (e.kind === "kill" || e.kind === "death") this.pushFeed(e.text);
-      else if (e.kind === "roundEnd") this.pushFeed(`🏆 ${e.text} takes the round`);
-      else if (e.kind === "matchEnd") this.pushFeed(`🏆 ${e.text} WINS THE MATCH`);
-      else if (e.kind === "round") this.pushFeed(`— ${e.text} —`);
+      if (e.kind === "kill" || e.kind === "death") {
+        if (e.text) this.pushFeed(e.text);
+        const victim = s.players.find((p) => p.id === e.b) ?? s.players.find((p) => p.id === e.a);
+        if (victim) this.burst(victim.x, victim.y + PH / 2, 18, victim.color);
+        try { this.sfx.die(); } catch { /* silent */ }
+        this.shake = Math.max(this.shake, 0.3);
+      } else if (e.kind === "explode") {
+        const at = s.players.find((p) => p.id === e.a);
+        const ex = at?.x ?? WORLD_W / 2, ey = at ? at.y + PH / 2 : WORLD_H / 2;
+        this.burst(ex, ey, 30, "#fb923c");
+        this.burst(ex, ey, 16, "#525252");
+        this.shake = Math.max(this.shake, 0.5);
+        try { this.sfx.boom(); } catch { /* silent */ }
+      } else if (e.kind === "beam") {
+        const from = s.players.find((p) => p.id === e.a);
+        if (from) {
+          const l = Math.hypot(from.aimX, from.aimY);
+          const dx = l > 1 ? from.aimX / l : from.facing, dy = l > 1 ? from.aimY / l : 0;
+          const color = e.text === "laser" ? "#22d3ee" : "#fef08a";
+          this.beams.push({
+            x1: from.x, y1: from.y + PH / 2 - 6,
+            x2: from.x + dx * 220, y2: from.y + PH / 2 - 6 + dy * 220,
+            t: 0.18, color,
+          });
+          if (this.beams.length > 12) this.beams.shift();
+        }
+        try { this.sfx.shoot(String(e.text ?? "laser")); } catch { /* silent */ }
+      } else if (e.kind === "throw") {
+        try { this.sfx.throwWeapon(); } catch { /* silent */ }
+      } else if (e.kind === "pickup") {
+        try { this.sfx.pickup(); } catch { /* silent */ }
+      } else if (e.kind === "roundEnd") {
+        this.pushFeed(`🏆 ${e.text} takes the round`);
+        this.banner = `🏆 ${e.text} TAKES THE ROUND`;
+        this.bannerT = 2;
+        try { this.sfx.win(); } catch { /* silent */ }
+      } else if (e.kind === "matchEnd") {
+        this.pushFeed(`🏆 ${e.text} WINS THE MATCH`);
+        this.banner = `🏆 ${e.text} WINS THE MATCH!`;
+        this.bannerT = 1e9;
+        try { this.sfx.win(); } catch { /* silent */ }
+      } else if (e.kind === "round") {
+        this.pushFeed(`— ${e.text} —`);
+        this.banner = `${e.text} — ROUND ${s.round}`;
+        this.bannerT = 2;
+      } else if (e.text) {
+        this.pushFeed(e.text);
+      }
     }
+    // Round banner fallback: snapshots carry round/levelId even when the
+    // round event arrived before we connected.
     if (s.levelId && s.levelId !== this.level.id) {
-      void resolveLevel(s.levelId).then((lv) => {
-        this.level = lv;
-      });
+      this.level = LEVELS.find((l) => l.id === s.levelId) ?? LEVELS[0] ?? FALLBACK_LEVEL;
+    }
+    if (this.bannerT <= 0 && this.banner === "" && s.round >= 1) {
+      this.banner = `${this.level.name} — ROUND ${s.round}`;
+      this.bannerT = 2;
     }
     this.snaps.push({ msg: s, at: performance.now() });
     if (this.snaps.length > 4) this.snaps.shift();
-    this.predictor.reconcile(s.players, this.net.clientId);
+    // Server tick doubles as the input-ack watermark (tick ~= seq).
+    this.predictor.reconcile(s.players, this.net.clientId, s.tick);
+    // New projectiles => muzzle flash (+ shot sound) on their owner.
+    const ids = new Set<number>();
+    for (const pr of s.projectiles) {
+      ids.add(pr.id);
+      if (!this.prevProjIds.has(pr.id)) {
+        this.muzzle.set(pr.owner, 0.09);
+        try { this.sfx.shoot(String(pr.kind)); } catch { /* silent */ }
+      }
+    }
+    this.prevProjIds = ids;
     const srv = s.players.find((p) => p.id === this.net.clientId) ?? null;
     if (srv) {
       if (!this.me) {
@@ -336,12 +398,44 @@ export class OnlineMode {
     p.aimY = inp.aimY;
   }
 
+  private burst(x: number, y: number, n: number, color: string): void {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 60 + Math.random() * 320;
+      this.parts.push({
+        x, y,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 120,
+        life: 0.5 + Math.random() * 0.4, max: 0.9,
+        color, size: 2 + Math.random() * 4,
+      });
+    }
+    if (this.parts.length > 400) this.parts.splice(0, this.parts.length - 400);
+  }
+
   // ---- frame / render ----
 
   private frame(t: number): void {
     const dt = Math.min(0.05, (t - this.lastFrame) / 1000 || 0.016);
     this.lastFrame = t;
-    void dt;
+    this.shake = Math.max(0, this.shake - dt * 1.6);
+    if (this.bannerT > 0 && this.bannerT < 1e8) this.bannerT -= dt;
+    for (const [id, m] of this.muzzle) {
+      const v = m - dt;
+      if (v <= 0) this.muzzle.delete(id);
+      else this.muzzle.set(id, v);
+    }
+    for (let i = this.parts.length - 1; i >= 0; i--) {
+      const q = this.parts[i];
+      q.life -= dt;
+      if (q.life <= 0) { this.parts.splice(i, 1); continue; }
+      q.vy += GRAVITY * 0.5 * dt;
+      q.x += q.vx * dt;
+      q.y += q.vy * dt;
+    }
+    for (let i = this.beams.length - 1; i >= 0; i--) {
+      this.beams[i].t -= dt;
+      if (this.beams[i].t <= 0) this.beams.splice(i, 1);
+    }
     this.render();
   }
 
@@ -378,195 +472,171 @@ export class OnlineMode {
     const { ctx } = this;
     const cw = this.canvas.width, ch = this.canvas.height;
     const { s, ox, oy } = this.view();
-    // bg
-    const theme = this.level.theme;
-    const g = ctx.createLinearGradient(0, 0, 0, ch);
-    if (theme === "foundry") {
-      g.addColorStop(0, "#1c1210");
-      g.addColorStop(1, "#3a1f14");
-    } else {
-      g.addColorStop(0, "#0b1a12");
-      g.addColorStop(1, "#132b1d");
-    }
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, cw, ch);
+    const snap = this.latest();
+    const time = snap?.time ?? performance.now() / 1000;
     ctx.save();
+    ctx.clearRect(0, 0, cw, ch);
     ctx.translate(ox, oy);
     ctx.scale(s, s);
-    // arena border
+    if (this.shake > 0) {
+      ctx.translate((Math.random() - 0.5) * this.shake * 16, (Math.random() - 0.5) * this.shake * 16);
+    }
+    // Themed arena backdrop shared with LocalMode.
+    drawBackground(ctx, this.level.theme, time);
+    // Arena border.
     ctx.strokeStyle = "rgba(255,255,255,0.15)";
     ctx.lineWidth = 2;
     ctx.strokeRect(0, 0, WORLD_W, WORLD_H);
 
-    this.drawPlatforms(ctx);
-    const snap = this.latest();
+    this.drawPlatforms(ctx, time);
     if (snap) {
-      for (const k of this.level.killRects ?? []) this.drawKillRect(ctx, k, snap.time);
-      for (const d of snap.drops) this.drawDrop(ctx, d.x, d.y, d.weapon);
-      for (const c of snap.crates) this.drawCrate(ctx, c.x, c.y, c.w, c.h, c.angle);
-      for (const b of snap.barrels) this.drawBarrel(ctx, b.x, b.y);
-      for (const pr of snap.projectiles) this.drawProjectile(ctx, pr.x, pr.y, pr.kind);
+      drawKillRects(ctx, this.level.killRects ?? [], time);
+      drawDrops(ctx, snap.drops, time);
+      drawCrates(ctx, snap.crates);
+      drawBarrels(ctx, snap.barrels);
+      for (const bm of this.beams) {
+        ctx.globalAlpha = Math.max(0, bm.t / 0.18);
+        ctx.strokeStyle = bm.color;
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(bm.x1, bm.y1);
+        ctx.lineTo(bm.x2, bm.y2);
+        ctx.stroke();
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bm.x1, bm.y1);
+        ctx.lineTo(bm.x2, bm.y2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      for (const pr of snap.projectiles) this.drawProjectile(ctx, pr, time);
       const players = this.interpPlayers();
       for (const p of players) {
         const show = p.id === this.net.clientId && this.me ? this.me : p;
-        this.drawPlayer(ctx, show);
+        // Server PlayerState is center-x / top-y; drawStick takes left/top.
+        drawStick(ctx, { ...show, x: show.x - PW / 2 } as PlayerState, time);
+        // HP bar + name tag (drawStick has no labels).
+        this.drawTag(ctx, show);
+        const mz = this.muzzle.get(show.id) ?? 0;
+        if (mz > 0 && show.alive && show.weapon !== "fists") this.drawMuzzle(ctx, show, mz);
       }
+      for (const q of this.parts) {
+        ctx.globalAlpha = Math.max(0, q.life / q.max);
+        ctx.fillStyle = q.color;
+        ctx.fillRect(q.x - q.size / 2, q.y - q.size / 2, q.size, q.size);
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Round banner from snapshot round/levelId (high, like LocalMode).
+    if (this.bannerT > 0 && this.banner) {
+      const matchWin = /WINS THE MATCH/i.test(this.banner);
+      const by = WORLD_H * 0.24;
+      ctx.textAlign = "center";
+      ctx.font = '64px "Luckiest Guy", system-ui, sans-serif';
+      ctx.lineWidth = 8;
+      ctx.strokeStyle = "#000";
+      ctx.strokeText(this.banner, WORLD_W / 2, by);
+      ctx.fillStyle = matchWin ? "#fde047" : "#facc15";
+      ctx.fillText(this.banner, WORLD_W / 2, by);
     }
     ctx.restore();
     this.drawHUD(ctx, cw, ch);
   }
 
-  private drawPlatforms(ctx: CanvasRenderingContext2D): void {
-    const t = this.latest()?.time ?? 0;
+  /** Static + mover + rotator platforms in LocalMode style. Snapshots carry
+   *  no platform anim state, so movers/rotators are computed client-side
+   *  from the level def and snapshot time — identical to the host sim. */
+  private drawPlatforms(ctx: CanvasRenderingContext2D, t: number): void {
     for (const pl of this.level.platforms) {
       if (pl.type === "blink") {
         const period = pl.period ?? 3, duty = pl.duty ?? 0.6, phase = pl.phase ?? 0;
         if (!(((t + phase) % period) < period * duty)) continue;
       }
-      const x = pl.x * WORLD_W, y = pl.y * WORLD_H, w = pl.w * WORLD_W, h = Math.max(6, pl.h * WORLD_H);
-      ctx.fillStyle =
-        pl.type === "ice" ? "#9fd8ff" :
-        pl.type === "bouncy" ? "#f472b6" :
-        pl.type === "conveyor" ? "#a78bfa" :
-        pl.type === "lava" ? "#ef4444" : "#4b6b4f";
+      const x = pl.x * WORLD_W, y = pl.y * WORLD_H;
+      const w = pl.w * WORLD_W, h = Math.max(6, pl.h * WORLD_H);
+      ctx.fillStyle = (pl.type && PLAT_COLORS[pl.type]) ?? WOOD_COLOR;
       ctx.fillRect(x, y, w, h);
-      ctx.fillStyle = "rgba(255,255,255,0.25)";
-      ctx.fillRect(x, y, w, 3);
+      ctx.fillStyle = "rgba(255,255,255,0.35)";
+      ctx.fillRect(x, y, w, 4);
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(x, y + h - 3, w, 3);
     }
     for (const m of this.level.movers ?? []) {
       const off = Math.sin((t * Math.PI * 2) / Math.max(0.1, m.period) + (m.phase ?? 0)) * m.range * WORLD_W;
-      ctx.fillStyle = "#d9a441";
-      ctx.fillRect(
-        m.x * WORLD_W + (m.axis === "x" ? off : 0),
-        m.y * WORLD_H + (m.axis === "y" ? off : 0),
-        m.w * WORLD_W, Math.max(6, m.h * WORLD_H),
-      );
+      const x = m.x * WORLD_W + (m.axis === "x" ? off : 0);
+      const y = m.y * WORLD_H + (m.axis === "y" ? off : 0);
+      const w = m.w * WORLD_W, h = Math.max(6, m.h * WORLD_H);
+      ctx.fillStyle = PLAT_COLORS["mover"];
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = "rgba(255,255,255,0.35)";
+      ctx.fillRect(x, y, w, 4);
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(x, y + h - 3, w, 3);
     }
-  }
-
-  private drawKillRect(
-    ctx: CanvasRenderingContext2D,
-    k: { x: number; y: number; w: number; h: number; kind: string; period?: number; duty?: number; phase?: number },
-    t: number,
-  ): void {
-    let active = true;
-    if (k.kind === "laser" && k.period) {
-      active = ((t + (k.phase ?? 0)) % k.period) < k.period * (k.duty ?? 0.5);
-    }
-    if (!active) return;
-    ctx.fillStyle = k.kind === "laser" ? "rgba(255,60,60,0.8)" : "rgba(255,120,20,0.55)";
-    ctx.fillRect(k.x * WORLD_W, k.y * WORLD_H, k.w * WORLD_W, k.h * WORLD_H);
-  }
-
-  private drawDrop(ctx: CanvasRenderingContext2D, x: number, y: number, weapon: string): void {
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.fillStyle = "#1f2937";
-    ctx.strokeStyle = "#fbbf24";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.rect(-16, -8, 32, 16);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#fbbf24";
-    ctx.font = "10px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(weapon.slice(0, 6), 0, 3);
-    ctx.restore();
-  }
-
-  private drawCrate(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, angle: number): void {
-    ctx.save();
-    ctx.translate(x + w / 2, y + h / 2);
-    ctx.rotate(angle);
-    ctx.fillStyle = "#8b5a2b";
-    ctx.fillRect(-w / 2, -h / 2, w, h);
-    ctx.strokeStyle = "#5b3a17";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(-w / 2, -h / 2, w, h);
-    ctx.beginPath();
-    ctx.moveTo(-w / 2, -h / 2);
-    ctx.lineTo(w / 2, h / 2);
-    ctx.moveTo(w / 2, -h / 2);
-    ctx.lineTo(-w / 2, h / 2);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  private drawBarrel(ctx: CanvasRenderingContext2D, x: number, y: number): void {
-    ctx.fillStyle = "#b91c1c";
-    ctx.beginPath();
-    ctx.ellipse(x, y, 14, 24, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#fbbf24";
-    ctx.font = "bold 12px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText("!", x, y + 4);
-  }
-
-  private drawProjectile(ctx: CanvasRenderingContext2D, x: number, y: number, kind: string): void {
-    ctx.fillStyle = kind === "laser" ? "#22d3ee" : "#fde047";
-    ctx.beginPath();
-    ctx.arc(x, y, kind === "laser" ? 5 : 4, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  private drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerState): void {
-    if (!p.alive) {
+    for (const r of this.level.rotators ?? []) {
       ctx.save();
-      ctx.globalAlpha = 0.35;
-      ctx.strokeStyle = p.color;
+      ctx.translate(r.cx * WORLD_W, r.cy * WORLD_H);
+      ctx.rotate(t * r.angleSpeed);
+      ctx.fillStyle = PLAT_COLORS["rotator"];
+      ctx.fillRect((-r.w * WORLD_W) / 2, (-r.h * WORLD_H) / 2, r.w * WORLD_W, r.h * WORLD_H);
+      ctx.restore();
+    }
+  }
+
+  /** Projectiles in the LocalMode palette: tracers + per-kind bodies. */
+  private drawProjectile(ctx: CanvasRenderingContext2D, pr: ProjectileState, time: number): void {
+    const kind = String(pr.kind);
+    if (kind === "snake" || kind === "snakeshot") {
+      drawSnakes(ctx, [pr], time);
+    } else if (kind === "grenade") {
+      ctx.fillStyle = pr.life < 0.5 ? "#ef4444" : "#1f2937";
+      ctx.beginPath();
+      ctx.arc(pr.x, pr.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (kind === "thrown") {
+      ctx.save();
+      ctx.translate(pr.x, pr.y);
+      ctx.rotate(time * 12);
+      ctx.fillStyle = "#e5e7eb";
+      ctx.fillRect(-12, -3, 24, 6);
+      ctx.restore();
+    } else if (kind === "flamethrower") {
+      ctx.fillStyle = Math.random() < 0.5 ? "#fb923c" : "#fbbf24";
+      ctx.beginPath();
+      ctx.arc(pr.x, pr.y, 5 + Math.random() * 3, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (kind === "bouncer") {
+      ctx.fillStyle = "#4ade80";
+      ctx.beginPath();
+      ctx.arc(pr.x, pr.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (kind === "laser") {
+      ctx.fillStyle = "#22d3ee";
+      ctx.beginPath();
+      ctx.arc(pr.x, pr.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (WEAPONS[pr.kind]?.explosive) {
+      ctx.fillStyle = "#fb923c";
+      ctx.beginPath();
+      ctx.arc(pr.x, pr.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Hitscan-ish tracer along velocity (LocalMode default).
+      ctx.strokeStyle = "#fef08a";
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(p.x - 12, p.y + 10);
-      ctx.lineTo(p.x + 12, p.y + 34);
-      ctx.moveTo(p.x + 12, p.y + 10);
-      ctx.lineTo(p.x - 12, p.y + 34);
+      ctx.moveTo(pr.x, pr.y);
+      ctx.lineTo(pr.x - pr.vx * 0.018, pr.y - pr.vy * 0.018);
       ctx.stroke();
-      ctx.restore();
-      return;
     }
+  }
+
+  /** HP bar + name tag above a player (drawStick draws no labels). Coords are
+   *  server space: p.x center, p.y top. */
+  private drawTag(ctx: CanvasRenderingContext2D, p: PlayerState): void {
+    if (!p.alive) return;
     const cx = p.x, top = p.y;
-    const midY = top + 22, hipY = top + 38;
-    const run = Math.min(1, Math.abs(p.vx) / MOVE_SPEED);
-    const t = performance.now() / 140;
-    const swing = p.onGround ? Math.sin(t) * 9 * run : 5;
-    ctx.strokeStyle = p.color === "#eab308" ? "#eab308" : p.color;
-    ctx.fillStyle = ctx.strokeStyle as string;
-    ctx.lineWidth = 4;
-    ctx.lineCap = "round";
-    // legs
-    ctx.beginPath();
-    ctx.moveTo(cx, hipY);
-    ctx.lineTo(cx - 8 - swing, top + PH);
-    ctx.moveTo(cx, hipY);
-    ctx.lineTo(cx + 8 + swing, top + PH);
-    ctx.stroke();
-    // body
-    ctx.beginPath();
-    ctx.moveTo(cx, midY);
-    ctx.lineTo(cx, hipY);
-    ctx.stroke();
-    // gun arm toward aim
-    const l = Math.hypot(p.aimX, p.aimY);
-    const ax = l > 1 ? p.aimX / l : p.facing, ay = l > 1 ? p.aimY / l : 0;
-    ctx.beginPath();
-    ctx.moveTo(cx, midY);
-    ctx.lineTo(cx + ax * 22, midY + ay * 22);
-    ctx.stroke();
-    if (p.weapon !== "fists") {
-      ctx.fillStyle = "#111827";
-      ctx.fillRect(cx + ax * 22 - 7, midY + ay * 22 - 3, 14, 6);
-    }
-    // head
-    ctx.beginPath();
-    ctx.arc(cx, top + 9, 9, 0, Math.PI * 2);
-    ctx.fillStyle = "#f5f5f5";
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#111";
-    ctx.stroke();
-    // hp bar + name
     const w = 44;
     ctx.fillStyle = "rgba(0,0,0,0.6)";
     ctx.fillRect(cx - w / 2, top - 16, w, 6);
@@ -576,6 +646,54 @@ export class OnlineMode {
     ctx.font = "10px monospace";
     ctx.textAlign = "center";
     ctx.fillText(p.id === this.net.clientId ? `${p.name} (you)` : p.name, cx, top - 20);
+  }
+
+  /** Muzzle-flash star at the gun tip (LocalMode style, minimal). */
+  private drawMuzzle(ctx: CanvasRenderingContext2D, p: PlayerState, mz: number): void {
+    const l = Math.hypot(p.aimX, p.aimY);
+    const ang = l > 1 ? Math.atan2(p.aimY, p.aimX) : p.facing < 0 ? Math.PI : 0;
+    const shY = p.y + PH / 2 - 6;
+    const tx = p.x + Math.cos(ang) * 44;
+    const ty = shY + Math.sin(ang) * 44;
+    const r = 8 + Math.random() * 6;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, mz / 0.09);
+    ctx.fillStyle = "#fef08a";
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = ang + (i / 6) * Math.PI * 2;
+      const rr = i % 2 === 0 ? r : r * 0.45;
+      const px = tx + Math.cos(a) * rr;
+      const py = ty + Math.sin(a) * rr;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#fff7ed";
+    ctx.beginPath();
+    ctx.arc(tx, ty, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /** DOM HUD state for main.ts: roster + wins + ping. */
+  getHudState(): HudState {
+    const snap = this.latest();
+    return {
+      players: (snap?.players ?? []).map((p) => ({
+        name: p.id === this.net.clientId ? `${p.name} (you)` : p.name,
+        color: p.color,
+        wins: p.wins,
+        alive: p.alive,
+        ammo: p.weapon === "fists" ? -1 : p.ammo,
+        weapon: p.weapon,
+      })),
+      round: snap?.round ?? 1,
+      levelName: `${this.level.name} · ONLINE`,
+      ping: this.net.pingMs,
+      killfeed: [...this.feed],
+    };
   }
 
   private drawHUD(ctx: CanvasRenderingContext2D, cw: number, ch: number): void {
@@ -612,12 +730,14 @@ export class OnlineMode {
     ctx.textAlign = "right";
     const board = [...snap.players].sort((x, y) => y.wins - x.wins).map((p) => `${p.name}:${p.wins}`).join("  ");
     ctx.fillText(board, cw - 18, 30);
-    ctx.fillText(`tick ${snap.tick}`, cw - 18, 48);
-    // roster / feed
+    ctx.fillText(`tick ${snap.tick} · unacked ${this.predictor.unackedCount}`, cw - 18, 48);
+    // roster (name + wins) / feed
     ctx.textAlign = "left";
     ctx.fillStyle = "#93c5fd";
+    const winsById = new Map(snap.players.map((p) => [p.id, p.wins]));
     this.roster.slice(0, 4).forEach((r, i) => {
-      ctx.fillText(`${r.bot ? "[bot]" : ""}${r.name}`, 18, ch - 90 + i * 16);
+      const w = winsById.get(r.id) ?? 0;
+      ctx.fillText(`${r.bot ? "[bot]" : ""}${r.name} ★${w}`, 18, ch - 90 + i * 16);
     });
     ctx.fillStyle = "#e5e7eb";
     this.feed.slice(-5).forEach((f, i) => {

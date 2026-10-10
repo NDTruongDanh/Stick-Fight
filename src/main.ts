@@ -1,5 +1,5 @@
 import './styles.css';
-import { Ui } from './ui/screens.js';
+import { Ui, normalizeWsUrl } from './ui/screens.js';
 import type { HudState } from './ui/hud.js';
 import { PLAYER_COLORS } from '../shared/constants.js';
 
@@ -95,7 +95,8 @@ async function startLocal(humans: number, bots: boolean): Promise<void> {
 function showHostSetup(): void {
   ui.showSetup('HOST GAME', (d) => {
     if (d.back) { showMenu(); return; }
-    const addr = `${window.location.hostname}:8080`;
+    const host = window.location.hostname || 'localhost';
+    const addr = `${host}:8080`;
     ui.showLobby(
       { title: 'LOBBY — HOST', addr: `ws://${addr}`, players: [{ name: d.name, color: PLAYER_COLORS[0], bot: false }] },
       {
@@ -103,15 +104,31 @@ function showHostSetup(): void {
         onLeave: showMenu,
       },
     );
+    ui.toast('Run `npm run host` on this machine, then press FIGHT!');
   });
 }
 
 function showJoinSetup(): void {
   ui.showSetup('JOIN GAME', (d) => {
     if (d.back) { showMenu(); return; }
-    if (!d.ip) { ui.toast('Enter the host IP address'); return; }
-    void startOnline(`ws://${d.ip}:8080`, d.name);
+    // Screens.ts already validates + normalizes to a ws:// URL; re-normalize
+    // defensively so bare IPs still work.
+    const url = /^wss?:\/\//i.test(d.ip) ? d.ip : normalizeWsUrl(d.ip);
+    if (!url) { ui.toast('Enter a valid address, e.g. ws://192.168.1.10:8080'); return; }
+    void startOnline(url, d.name);
   }, { ip: true, startLabel: 'CONNECT' });
+}
+
+/** Map low-level NetClient connect failures to actionable toasts. */
+function connectErrorToast(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? '');
+  if (/server full/i.test(raw)) return 'Server is full (max 4 players) — try again later';
+  if (/protocol mismatch|version mismatch/i.test(raw)) return 'Version mismatch — update the game and retry';
+  if (/no hello/i.test(raw)) return 'Server did not respond — is `npm run host` running?';
+  if (/refused|failed|timed out|timeout|websocket error|not respond|could not connect|no welcome/i.test(raw)) {
+    return 'Could not connect — is the server running? (`npm run host`)';
+  }
+  return raw ? `Could not connect — ${raw.slice(0, 90)}` : 'Could not connect — is the server running? (`npm run host`)';
 }
 
 // OnlineMode is lazy-loaded so the local game stays in its own chunk.
@@ -137,7 +154,7 @@ async function startOnline(url: string, name: string): Promise<void> {
     quitBtn.classList.remove('hidden');
   } catch (err) {
     console.error(err);
-    ui.toast('Could not connect — is the server running? (npm run host)');
+    ui.toast(connectErrorToast(err));
     showMenu();
   }
 }

@@ -104,6 +104,8 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
     sword: {},
     spear: {},
     laser: { life: 1.6 },
+    snake: { life: 6 },
+    snakeshot: { life: 6 },
   };
   const out = {} as Record<WeaponId, GunDef>;
   (Object.keys(CANON_WEAPONS) as WeaponId[]).forEach((id) => {
@@ -133,8 +135,10 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
 const DROP_CYCLE: WeaponId[] = [
   "pistol", "shotgun", "uzi", "ak47", "sniper", "revolver", "deagle",
   "grenade", "rpg", "sword", "spear", "minigun", "laser", "bouncer",
-  "sawedoff", "flamethrower", "m16",
+  "sawedoff", "flamethrower", "m16", "snake", "snakeshot",
 ];
+const DROP_COMMON: WeaponId[] = DROP_CYCLE.filter((w) => w !== "snake" && w !== "snakeshot");
+const DROP_RARE: WeaponId[] = ["snake", "snakeshot"];
 
 interface Proj extends ProjectileState {
   damage: number;
@@ -322,7 +326,9 @@ export class Match {
     // level's drop spots, y near the top, gravity + sway do the rest.
     const spots = this.level.weaponDrops.length ? this.level.weaponDrops : [[0.5, 0.2]];
     const s = spots[this.dropIndex++ % spots.length];
-    const weapon = DROP_CYCLE[(Math.random() * DROP_CYCLE.length) | 0];
+    // Snakes are rare: ~7% of drops.
+    const pool = Math.random() < 0.07 ? DROP_RARE : DROP_COMMON;
+    const weapon = pool[(Math.random() * pool.length) | 0];
     if (this.drops.length >= MAX_DROPS) this.drops.shift();
     this.drops.push({
       x: s[0] * WORLD_W, y: WORLD_H * 0.02,
@@ -651,11 +657,32 @@ export class Match {
     }
   }
 
+  private steerSnake(pr: Proj, dt: number): void {
+    let bx = 0, by = 0, bd = Infinity, found = false;
+    for (const q of this.players) {
+      if (!q.alive || q.id === pr.owner) continue;
+      const d = Math.hypot(q.x - pr.x, q.y + PH / 2 - pr.y);
+      if (d < bd) { bd = d; bx = q.x; by = q.y + PH / 2; found = true; }
+    }
+    if (!found) return;
+    const speed = Math.hypot(pr.vx, pr.vy) || 260;
+    const cur = Math.atan2(pr.vy, pr.vx);
+    const want = Math.atan2(by - pr.y, bx - pr.x);
+    let da = want - cur;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    const maxTurn = 3 * dt;
+    const na = cur + Math.max(-maxTurn, Math.min(maxTurn, da));
+    pr.vx = Math.cos(na) * speed;
+    pr.vy = Math.sin(na) * speed;
+  }
+
   private stepProjectiles(dt: number): void {
     const solids = this.solids();
     const keep: Proj[] = [];
     for (const pr of this.projectiles) {
       pr.life -= dt;
+      if (pr.kind === "snake" || pr.kind === "snakeshot") this.steerSnake(pr, dt);
       if (pr.gravity) pr.vy += pr.gravity * dt;
       // Grenade fuse: blows up mid-air like LocalMode (no protocol change).
       if (pr.fuse !== undefined && pr.fuse > 0) {

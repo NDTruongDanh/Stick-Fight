@@ -137,6 +137,47 @@ export function drawDrops(ctx: CanvasRenderingContext2D, drops: DroppedGun[], ti
   }
 }
 
+/** Green wiggly snake projectiles (kind 'snake' | 'snakeshot'). */
+export function drawSnakes(
+  ctx: CanvasRenderingContext2D,
+  projs: { x: number; y: number; vx: number; vy: number; kind: string; id?: number }[],
+  time = 0,
+): void {
+  for (const p of projs ?? []) {
+    if (p.kind !== 'snake' && p.kind !== 'snakeshot') continue;
+    const l = Math.hypot(p.vx, p.vy) || 1;
+    const dx = p.vx / l;
+    const dy = p.vy / l;
+    const px = -dy;
+    const py = dx;
+    const phase = time * 14 + (p.id ?? p.x) * 0.7;
+    ctx.save();
+    ctx.lineCap = 'round';
+    // Body: 4 trailing segments with sinusoidal wiggle, tapering.
+    for (let i = 4; i >= 1; i--) {
+      const back = i * 7;
+      const wig = Math.sin(phase - i * 0.9) * (2 + i * 0.8);
+      const sx = p.x - dx * back + px * wig;
+      const sy = p.y - dy * back + py * wig;
+      ctx.fillStyle = i % 2 === 0 ? '#22c55e' : '#16a34a';
+      ctx.beginPath();
+      ctx.arc(sx, sy, 5 - i * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Head.
+    ctx.fillStyle = '#4ade80';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#052e16';
+    const ex = p.x + dx * 2;
+    const ey = p.y + dy * 2;
+    ctx.fillRect(ex - 2 + px * 2, ey - 1 + py * 2, 2, 2);
+    ctx.fillRect(ex - 2 - px * 2, ey - 1 - py * 2, 2, 2);
+    ctx.restore();
+  }
+}
+
 function toPixels(r: KillRectDef): { x: number; y: number; w: number; h: number } {
   // Level defs are normalized 0..1; runtime may already be pixels.
   if (r.x <= 1.5 && r.y <= 1.5 && r.w <= 1.5 && r.h <= 1.5) {

@@ -13,11 +13,14 @@ import type { HudState } from '../ui/hud.js';
 import { LEVELS } from '../levels/levels.js';
 import { WEAPONS } from '../weapons/defs.js';
 import { Sfx } from '../core/audio.js';
-import { drawBackground } from '../entities/props.js';
+import { drawBackground, drawSnakes } from '../entities/props.js';
 import { drawStick } from '../entities/stick.js';
 
-// All 18 minus fists.
-const GUN_POOL: WeaponId[] = ['pistol', 'revolver', 'deagle', 'uzi', 'ak47', 'm16', 'sniper', 'shotgun', 'sawedoff', 'bouncer', 'minigun', 'grenade', 'rpg', 'flamethrower', 'sword', 'spear', 'laser'];
+// All 18 minus fists, plus rare snake guns (weighted rare in spawnDrop).
+const GUN_POOL: WeaponId[] = ['pistol', 'revolver', 'deagle', 'uzi', 'ak47', 'm16', 'sniper', 'shotgun', 'sawedoff', 'bouncer', 'minigun', 'grenade', 'rpg', 'flamethrower', 'sword', 'spear', 'laser', 'snake', 'snakeshot'];
+const RARE_SET: ReadonlySet<WeaponId> = new Set<WeaponId>(['snake', 'snakeshot']);
+const COMMON_POOL: WeaponId[] = GUN_POOL.filter((w) => !RARE_SET.has(w));
+const RARE_POOL: WeaponId[] = GUN_POOL.filter((w) => RARE_SET.has(w));
 
 interface Tune { fuse?: number; grav?: number; life?: number; bounces?: number }
 const TUNE: Record<WeaponId, Tune> = {
@@ -29,6 +32,8 @@ const TUNE: Record<WeaponId, Tune> = {
   rpg: { grav: 0.12, life: 3 },
   flamethrower: { life: 0.32, grav: 0 },
   sword: {}, spear: {}, laser: {},
+  snake: { life: 6, grav: 0 },
+  snakeshot: { life: 6, grav: 0 },
 };
 
 const THROW_DAMAGE = 55;
@@ -180,7 +185,10 @@ export class LocalMode {
 
   private spawnDrop(x: number): void {
     // Drops fall from the sky (original Stick Fight style), not at floor spots.
-    const w = GUN_POOL[(Math.random() * GUN_POOL.length) | 0];
+    // Snakes are rare: ~7% of drops.
+    const w = Math.random() < 0.07
+      ? RARE_POOL[(Math.random() * RARE_POOL.length) | 0]
+      : COMMON_POOL[(Math.random() * COMMON_POOL.length) | 0];
     this.drops.push({ x, y: H * 0.02, vx: (Math.random() - 0.5) * 120, vy: 0, weapon: w, ammo: fullAmmo(w) });
   }
 
@@ -278,6 +286,27 @@ export class LocalMode {
     let best: R | null = null, bd = 1e9;
     for (const p of this.players) { if (p === b || !p.alive) continue; const d = Math.abs(p.x - b.x) + Math.abs(p.y - b.y); if (d < bd) { bd = d; best = p; } }
     return best;
+  }
+
+  /** Snake homing: steer velocity toward nearest living enemy (not owner), ~3 rad/s. */
+  private steerSnake(pr: Proj, dt: number): void {
+    let best: R | null = null, bd = Infinity;
+    for (const p of this.players) {
+      if (!p.alive || p.id === pr.owner) continue;
+      const d = Math.hypot(p.x - pr.x, (p.y - 34) - pr.y);
+      if (d < bd) { bd = d; best = p; }
+    }
+    if (!best) return;
+    const speed = Math.hypot(pr.vx, pr.vy) || 260;
+    const cur = Math.atan2(pr.vy, pr.vx);
+    const want = Math.atan2((best.y - 34) - pr.y, best.x - pr.x);
+    let da = want - cur;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    const maxTurn = 3 * dt;
+    const na = cur + Math.max(-maxTurn, Math.min(maxTurn, da));
+    pr.vx = Math.cos(na) * speed;
+    pr.vy = Math.sin(na) * speed;
   }
 
   private botInput(b: R, dt: number): { l: boolean; r: boolean; j: boolean; fire: boolean; blk: boolean } {
@@ -571,6 +600,7 @@ export class LocalMode {
     const s2 = this.solids();
     for (const pr of this.projs) {
       pr.life -= dt;
+      if (pr.kind === 'snake' || pr.kind === 'snakeshot') this.steerSnake(pr, dt);
       if (pr.fuse > 0) { pr.fuse -= dt; if (pr.fuse <= 0) { if (pr.explosive) this.explode(pr.x, pr.y, pr.explosive, pr.dmg, pr.owner); pr.life = 0; continue; } }
       pr.vy += GRAVITY * pr.grav * dt; pr.x += pr.vx * dt; pr.y += pr.vy * dt;
       let hit = pr.x < 0 || pr.x > W || pr.y < -60 || pr.y > H + 40;
@@ -716,6 +746,7 @@ export class LocalMode {
       c.globalAlpha = 1;
     }
     for (const pr of this.projs) {
+      if (pr.kind === 'snake' || pr.kind === 'snakeshot') continue;
       if (pr.kind === 'grenade') { c.fillStyle = pr.fuse < 0.5 ? '#ef4444' : '#1f2937'; c.beginPath(); c.arc(pr.x, pr.y, 7, 0, Math.PI * 2); c.fill(); }
       else if (pr.kind === 'thrown') { c.save(); c.translate(pr.x, pr.y); c.rotate(this.time * 12); c.fillStyle = '#e5e7eb'; c.fillRect(-12, -3, 24, 6); c.restore(); }
       else if (pr.kind === 'flamethrower') { c.fillStyle = Math.random() < 0.5 ? '#fb923c' : '#fbbf24'; c.beginPath(); c.arc(pr.x, pr.y, 5 + Math.random() * 3, 0, Math.PI * 2); c.fill(); }
@@ -723,6 +754,7 @@ export class LocalMode {
       else if (pr.explosive) { c.fillStyle = '#fb923c'; c.beginPath(); c.arc(pr.x, pr.y, 6, 0, Math.PI * 2); c.fill(); }
       else { c.strokeStyle = '#fef08a'; c.lineWidth = 3; c.beginPath(); c.moveTo(pr.x, pr.y); c.lineTo(pr.x - pr.vx * 0.018, pr.y - pr.vy * 0.018); c.stroke(); }
     }
+    drawSnakes(c, this.projs, this.time);
     for (const p of this.players) this.stick(p);
     for (const q of this.parts) { c.globalAlpha = Math.max(0, q.life / q.max); c.fillStyle = q.color; c.fillRect(q.x - q.size / 2, q.y - q.size / 2, q.size, q.size); }
     c.globalAlpha = 1;

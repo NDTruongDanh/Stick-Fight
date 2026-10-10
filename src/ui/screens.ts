@@ -21,6 +21,35 @@ export interface SetupOpts {
   startLabel?: string;
 }
 
+/**
+ * Normalize a user-typed server address to a ws:// URL.
+ * Accepts `ws://host:port`, `ws://host`, `host:port`, or bare `host`
+ * (default port 8080). Returns null when the input is not a valid host[:port].
+ */
+export function normalizeWsUrl(raw: string): string | null {
+  let s = (raw || '').trim();
+  if (!s) return null;
+  s = s.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
+  if (!/^wss?:\/\//i.test(s)) s = `ws://${s}`;
+  const m = s.match(/^(wss?:\/\/)([^/:]+)(?::(\d+))?(?:\/.*)?$/i);
+  if (!m) return null;
+  const host = m[2].trim();
+  if (!host || /[^a-zA-Z0-9.\-_]/.test(host)) return null;
+  const port = m[3] ? Number(m[3]) : 8080;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return `${m[1].toLowerCase()}${host}:${port}`;
+}
+
+function lanHint(): string {
+  let host = '';
+  try {
+    host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : '';
+  } catch {
+    host = '';
+  }
+  return host || 'localhost';
+}
+
 export interface LobbyPlayer {
   name: string;
   color: string;
@@ -197,9 +226,19 @@ export class Ui {
         </label>
         ${
           opts.ip
-            ? `<label class="text-sm text-neutral-300">Host IP
-                 <input id="s-ip" class="${INPUT} mt-1" placeholder="192.168.1.10" />
+            ? `<label class="text-sm text-neutral-300">Host address
+                 <input id="s-ip" class="${INPUT} mt-1 font-mono" placeholder="ws://${lanHint()}:8080" />
+                 <span class="block text-[11px] text-neutral-500 mt-1">examples: <span class="font-mono text-neutral-300">ws://192.168.1.10:8080</span> · <span class="font-mono text-neutral-300">192.168.1.10:8080</span> · <span class="font-mono text-neutral-300">192.168.1.10</span> (port 8080)</span>
+                 <span id="s-ip-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
                </label>`
+            : ''
+        }
+        ${
+          !opts.ip && !opts.local
+            ? `<div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
+                 Friends join at <span class="font-mono text-green-300">ws://${esc(lanHint())}:8080</span><br />
+                 <span class="text-neutral-400">On the host PC first run <span class="font-mono text-green-300">npm run host</span>, then press START below.</span>
+               </div>`
             : ''
         }
         ${
@@ -214,8 +253,26 @@ export class Ui {
     wireBotToggle(this.screen, state as { bots: boolean });
     const name = this.screen.querySelector<HTMLInputElement>('#s-name');
     const ip = this.screen.querySelector<HTMLInputElement>('#s-ip');
+    const ipErr = this.screen.querySelector<HTMLElement>('#s-ip-err');
     name?.select();
-    const go = () => cb({ name: (name?.value || 'PLAYER').toUpperCase().slice(0, 12), ip: (ip?.value || '').trim(), humans: state.humans, bots: state.bots });
+    const go = () => {
+      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      if (opts.ip) {
+        const url = normalizeWsUrl(ip?.value || '');
+        if (!url) {
+          if (ipErr) {
+            ipErr.textContent = 'Enter a valid address, e.g. ws://192.168.1.10:8080';
+            ipErr.classList.remove('hidden');
+          }
+          this.toast('Enter a valid address, e.g. ws://192.168.1.10:8080');
+          ip?.focus();
+          return;
+        }
+        cb({ name: rawName, ip: url, humans: state.humans, bots: state.bots });
+        return;
+      }
+      cb({ name: rawName, ip: (ip?.value || '').trim(), humans: state.humans, bots: state.bots });
+    };
     (this.screen.querySelector('#s-go') as HTMLButtonElement).onclick = go;
     (this.screen.querySelector('#s-back') as HTMLButtonElement).onclick = () =>
       cb({ name: '', ip: '', humans: state.humans, bots: state.bots, back: true });
