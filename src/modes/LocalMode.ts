@@ -313,6 +313,13 @@ export class LocalMode {
 
   /** Player-player soft collision: overlap splits apart horizontally, no damage. */
   private separatePlayers(): void {
+    const solids = this.solids();
+    const inside = (x: number, y: number): boolean => {
+      for (const s of solids) {
+        if (this.collideBox(x, y, s)) return true;
+      }
+      return false;
+    };
     const ps = this.players.filter((p) => p.alive);
     for (let i = 0; i < ps.length; i++) {
       for (let j = i + 1; j < ps.length; j++) {
@@ -324,10 +331,84 @@ export class LocalMode {
         if (overlapX <= 0) continue;
         const push = overlapX / 2 + 0.5;
         const s = dx >= 0 ? 1 : -1;
-        a.x = Math.max(12, Math.min(W - 12, a.x - s * push));
-        b.x = Math.max(12, Math.min(W - 12, b.x + s * push));
+        // Wall-aware: never shove a victim through a wall into a sealed area.
+        const nax = Math.max(12, Math.min(W - 12, a.x - s * push));
+        const nbx = Math.max(12, Math.min(W - 12, b.x + s * push));
+        if (!inside(nax, a.y)) a.x = nax;
+        else {
+          const half = Math.max(12, Math.min(W - 12, a.x - s * (push / 2)));
+          if (!inside(half, a.y)) a.x = half;
+        }
+        if (!inside(nbx, b.y)) b.x = nbx;
+        else {
+          const half = Math.max(12, Math.min(W - 12, b.x + s * (push / 2)));
+          if (!inside(half, b.y)) b.x = half;
+        }
       }
     }
+    // Final sweep: any residual penetration (knockback / carry) ejects via
+    // minimum penetration so sealed areas stay sealed.
+    for (const p of ps) this.depenetrate(p, solids);
+  }
+
+  /** Eject a body left inside a solid (knockback / soft-push / carry). */
+  private depenetrate(p: R, solids: Solid[]): void {
+    for (let iter = 0; iter < 4; iter++) {
+      let hit: Solid | null = null;
+      for (const s of solids) {
+        if (this.collideBox(p.x, p.y, s)) { hit = s; break; }
+      }
+      if (!hit) break;
+      const s = hit;
+      const penL = p.x + 12 - s.x;
+      const penR = s.x + s.w - (p.x - 12);
+      const penT = p.y - s.y;
+      const penB = s.y + s.h - (p.y - 68);
+      const penX = Math.min(penL, penR);
+      const penY = Math.min(penT, penB);
+      if (penX < penY) {
+        p.x = penL < penR ? s.x - 12 : s.x + s.w + 12;
+        p.vx = 0;
+        p.x = Math.max(12, Math.min(W - 12, p.x));
+      } else {
+        // One-way decks: never pull a rising body down through a platform.
+        if (penT < penB) {
+          if (p.vy < 0) break;
+          p.y = s.y; p.vy = 0; p.onGround = true; p.ground = s.type;
+        } else {
+          p.y = s.y + s.h + 68; p.vy = 0;
+        }
+      }
+    }
+  }
+
+  /** True when a wall sits between two points (melee / blast line-of-sight). */
+  private segmentBlocked(x1: number, y1: number, x2: number, y2: number, solids: Solid[]): boolean {
+    const dx = x2 - x1, dy = y2 - y1;
+    for (const s of solids) {
+      if (x1 > s.x && x1 < s.x + s.w && y1 > s.y && y1 < s.y + s.h) continue;
+      if (x2 > s.x && x2 < s.x + s.w && y2 > s.y && y2 < s.y + s.h) continue;
+      let tmin = 0, tmax = 1;
+      if (Math.abs(dx) < 1e-9) {
+        if (x1 < s.x || x1 > s.x + s.w) continue;
+      } else {
+        let t1 = (s.x - x1) / dx, t2 = (s.x + s.w - x1) / dx;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+        if (tmin > tmax) continue;
+      }
+      if (Math.abs(dy) < 1e-9) {
+        if (y1 < s.y || y1 > s.y + s.h) continue;
+      } else {
+        let t1 = (s.y - y1) / dy, t2 = (s.y + s.h - y1) / dy;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+        if (tmin > tmax) continue;
+      }
+      const tHit = Math.max(tmin, 0);
+      if (tmax > 0 && tmin < 1 && tHit > 0.001 && tHit < 0.999) return true;
+    }
+    return false;
   }
 
   private burst(x: number, y: number, n: number, color: string, spd = 380): void {
@@ -371,9 +452,14 @@ export class LocalMode {
   private explode(x: number, y: number, r: number, dmg: number, owner: number): void {
     this.burst(x, y, 30, '#fb923c'); this.burst(x, y, 16, '#525252'); this.shake = Math.max(this.shake, 0.5);
     this.sfx.boom();
+    const solids = this.solids();
     for (const p of this.players) {
       const dx = p.x - x, dy = (p.y - 34) - y, d = Math.hypot(dx, dy);
-      if (p.alive && d < r) { const f = 1 - (d / r) * 0.6; const dealt = p.id === owner ? Math.min(dmg * f, 50) : dmg * f; this.hurt(p, dealt, (dx / (d || 1)) * 650 * f, -380 * f, owner, 'explosion'); }
+      if (p.alive && d < r) {
+        // Blast is blocked by walls: no knocking victims through a pillar.
+        if (this.segmentBlocked(x, y, p.x, p.y - 34, solids)) continue;
+        const f = 1 - (d / r) * 0.6; const dealt = p.id === owner ? Math.min(dmg * f, 50) : dmg * f; this.hurt(p, dealt, (dx / (d || 1)) * 650 * f, -380 * f, owner, 'explosion');
+      }
     }
     for (const b of this.barrels) if (b.hp > 0 && Math.hypot(b.x - x, b.y - y) < r) { b.hp = 0; this.fuses.push({ x: b.x, y: b.y, t: 0.12, r: 150, dmg: 55, owner }); }
   }
@@ -520,11 +606,16 @@ export class LocalMode {
       p.swing = 0.18; p.cd = w.melee.interval;
       this.sfx.shoot(p.weapon);
       this.burst(sx + Math.cos(aim) * w.melee.range * 0.7, sy + Math.sin(aim) * w.melee.range * 0.7, 4, '#e5e5e5', 150);
+      const solids = this.solids();
       for (const e of this.players) {
         if (e === p || !e.alive) continue;
         const dx = e.x - sx, dy = (e.y - 34) - sy, d = Math.hypot(dx, dy);
         let da = Math.abs(Math.atan2(dy, dx) - aim); if (da > Math.PI) da = 2 * Math.PI - da;
-        if (d < w.melee.range + 20 && da < w.melee.arc / 2 + 0.35) this.hurt(e, p.boss ? w.damage * BOSS_MELEE_MULT : w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon, sy < e.y - 51);
+        if (d < w.melee.range + 20 && da < w.melee.arc / 2 + 0.35) {
+          // Walls block melee: no spear/sword/fist hits through a pillar.
+          if (this.segmentBlocked(sx, sy, e.x, e.y - 34, solids)) continue;
+          this.hurt(e, p.boss ? w.damage * BOSS_MELEE_MULT : w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon, sy < e.y - 51);
+        }
       };
       // Punch-boost: swinging fists airborne kicks the attacker (mobility).
       if (p.weapon === 'fists' && !p.onGround) {
@@ -753,8 +844,23 @@ export class LocalMode {
         // Wall-slide dust on the contact side.
         this.parts.push({ x: p.x + p.wallD * 12, y: p.y - 24 - Math.random() * 28, vx: -p.wallD * 70, vy: 70, life: 0.3, max: 0.3, color: '#d6d3d1', size: 2 });
       }
-      p.x += p.vx * dt;
-      for (const s of solids) if (this.collideBox(p.x, p.y, s)) { p.x = p.vx > 0 ? s.x - 12 : p.vx < 0 ? s.x + s.w + 12 : p.x; p.vx = 0; }
+      // Substep X so one frame can never tunnel through a thin pillar.
+      const xDist = Math.abs(p.vx * dt);
+      const xSteps = Math.max(1, Math.min(8, Math.ceil(xDist / 8)));
+      const xh = dt / xSteps;
+      for (let xs = 0; xs < xSteps; xs++) {
+        p.x += p.vx * xh;
+        // One-way decks: only resolve a side hit when X motion caused the
+        // overlap. If the body already overlapped vertically (jumping up
+        // through a deck from below), X must not eject it sideways to the
+        // platform edge — Y (land/drop-through) owns that axis.
+        const oldX = p.x - p.vx * xh;
+        for (const s of solids) {
+          if (!this.collideBox(p.x, p.y, s)) continue;
+          if (this.collideBox(oldX, p.y, s)) continue;
+          p.x = p.vx > 0 ? s.x - 12 : p.vx < 0 ? s.x + s.w + 12 : p.x; p.vx = 0;
+        }
+      }
       p.x = Math.max(12, Math.min(W - 12, p.x));
       const prevY = p.y; p.y += p.vy * dt; p.onGround = false; p.ground = '';
       if (p.dropT <= 0) for (const s of solids) {
@@ -780,6 +886,10 @@ export class LocalMode {
           }
         }
       }
+      // Knockback / soft-push / carry can leave the body inside a side wall
+      // where the X "oldX" guard above intentionally skips — eject so sealed
+      // areas (Box Fort interior) can never be entered.
+      this.depenetrate(p, solids);
       if (p.y > H + 80) this.hurt(p, 999, 0, 0, p.id, 'fell');
       this.checkHazards(p);
       if (Math.abs(p.vx) > 40 && p.onGround) p.walk += dt * 11;

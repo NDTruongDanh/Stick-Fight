@@ -419,23 +419,38 @@ export class OnlineMode {
   }
 
   private simulateMe(p: PlayerState, inp: PredictedInput, dt: number): void {
+    if (!p.alive) return;
     const dir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
     if (dir !== 0) p.facing = dir;
     p.vx += (dir * MOVE_SPEED - p.vx) * Math.min(1, (p.onGround ? 14 : 7) * dt);
     p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
     const solids = this.solidsAt();
-    p.x += p.vx * dt;
-    for (const s of solids) {
-      if (p.x - PW / 2 < s.x + s.w && p.x + PW / 2 > s.x && p.y < s.y + s.h && p.y + PH > s.y) {
+    const ov = (x: number, y: number, s: { x: number; y: number; w: number; h: number }): boolean =>
+      x - PW / 2 < s.x + s.w && x + PW / 2 > s.x && y < s.y + s.h && y + PH > s.y;
+    const dist = Math.max(Math.abs(p.vx * dt), Math.abs(p.vy * dt));
+    const steps = Math.max(1, Math.min(8, Math.ceil(dist / 8)));
+    const h = dt / steps;
+    for (let st = 0; st < steps; st++) {
+      const oldX = p.x;
+      p.x += p.vx * h;
+      for (const s of solids) {
+        if (!ov(p.x, p.y, s)) continue;
+        // Only resolve when X motion caused the overlap; a pre-existing
+        // vertical overlap (jumping up into a deck) must not eject sideways.
+        if (ov(oldX, p.y, s)) continue;
         if (p.vx > 0) p.x = s.x - PW / 2;
         else if (p.vx < 0) p.x = s.x + s.w + PW / 2;
+        else {
+          const penL = (p.x + PW / 2) - s.x;
+          const penR = (s.x + s.w) - (p.x - PW / 2);
+          p.x = penL < penR ? s.x - PW / 2 : s.x + s.w + PW / 2;
+        }
         p.vx = 0;
       }
-    }
-    p.y += p.vy * dt;
-    p.onGround = false;
-    for (const s of solids) {
-      if (p.x - PW / 2 < s.x + s.w && p.x + PW / 2 > s.x && p.y < s.y + s.h && p.y + PH > s.y) {
+      p.y += p.vy * h;
+      p.onGround = false;
+      for (const s of solids) {
+        if (!ov(p.x, p.y, s)) continue;
         if (p.vy > 0) {
           p.y = s.y - PH;
           p.vy = 0;
@@ -443,7 +458,34 @@ export class OnlineMode {
         } else if (p.vy < 0) {
           p.y = s.y + s.h;
           p.vy = 0;
+        } else {
+          // Resting overlap (reconcile snap inside a solid): escape along the
+          // smallest vertical penetration so the next X pass stays stable.
+          const penT = (p.y + PH) - s.y;
+          const penB = (s.y + s.h) - p.y;
+          if (penT < penB) { p.y = s.y - PH; p.vy = 0; p.onGround = true; }
+          else { p.y = s.y + s.h; p.vy = 0; }
         }
+      }
+    }
+    // Prediction reconcile can snap the body inside a wall — eject via
+    // minimum penetration so sealed areas stay sealed on the client too.
+    for (let iter = 0; iter < 4; iter++) {
+      let hit: { x: number; y: number; w: number; h: number } | null = null;
+      for (const s of solids) {
+        if (ov(p.x, p.y, s)) { hit = s; break; }
+      }
+      if (!hit) break;
+      const s = hit;
+      const penX = Math.min(p.x + PW / 2 - s.x, s.x + s.w - (p.x - PW / 2));
+      const penY = Math.min(p.y + PH - s.y, s.y + s.h - p.y);
+      if (penX < penY) {
+        p.x = p.x < s.x + s.w / 2 ? s.x - PW / 2 : s.x + s.w + PW / 2;
+        p.vx = 0;
+      } else if (p.y + PH / 2 < s.y + s.h / 2) {
+        p.y = s.y - PH; p.vy = 0; p.onGround = true;
+      } else {
+        p.y = s.y + s.h; p.vy = 0;
       }
     }
     if (inp.jump && p.onGround) {

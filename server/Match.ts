@@ -341,7 +341,11 @@ export class Match {
     }
 
     // Player-player soft collision so fighters can't share one body.
-    separatePlayers(this.players);
+    // Wall-aware: never shove a victim through a wall into a sealed area.
+    separatePlayers(this.players, this.solids());
+    for (const p of this.players) {
+      if (p.alive) this.depenetrate(p, this.solids());
+    }
 
     this.stepProjectiles(dt);
     this.stepCrates(dt);
@@ -547,32 +551,61 @@ export class Match {
     }
     void wasGround;
 
-    // X axis
-    p.x += p.vx * dt;
-    for (const s of solids) {
-      if (this.overlap(p.x - PW / 2, p.y, PW, PH, s)) {
+    // Substep integration so one frame can never tunnel through a thin wall.
+    const dist = Math.max(Math.abs(p.vx * dt), Math.abs(p.vy * dt));
+    const steps = Math.max(1, Math.min(8, Math.ceil(dist / 8)));
+    const h = dt / steps;
+    let ground: Solid | null = null;
+    for (let st = 0; st < steps; st++) {
+      // X axis (only when X motion caused the overlap — a pre-existing
+      // vertical overlap from jumping up into a platform must not eject the
+      // body sideways to the platform edge; Y owns that axis).
+      const oldX = p.x;
+      p.x += p.vx * h;
+      for (const s of solids) {
+        if (!this.overlap(p.x - PW / 2, p.y, PW, PH, s)) continue;
+        if (this.overlap(oldX - PW / 2, p.y, PW, PH, s)) continue;
         if (p.vx > 0) p.x = s.x - PW / 2;
         else if (p.vx < 0) p.x = s.x + s.w + PW / 2;
+        else {
+          // No horizontal motion but X caused it (carried by a mover):
+          // push out along the smallest penetration, not across the body.
+          const penL = (p.x + PW / 2) - s.x;
+          const penR = (s.x + s.w) - (p.x - PW / 2);
+          p.x = penL < penR ? s.x - PW / 2 : s.x + s.w + PW / 2;
+        }
         p.vx = 0;
       }
-    }
-    // Y axis
-    p.y += p.vy * dt;
-    p.onGround = false;
-    let ground: Solid | null = null;
-    for (const s of solids) {
-      if (this.overlap(p.x - PW / 2, p.y, PW, PH, s)) {
-        if (p.vy > 0) {
-          p.y = s.y - PH;
-          p.vy = 0;
-          p.onGround = true;
-          ground = s;
-        } else if (p.vy < 0) {
-          p.y = s.y + s.h;
-          p.vy = 0;
+      // Y axis
+      p.y += p.vy * h;
+      p.onGround = false;
+      ground = null;
+      for (const s of solids) {
+        if (this.overlap(p.x - PW / 2, p.y, PW, PH, s)) {
+          if (p.vy > 0) {
+            p.y = s.y - PH;
+            p.vy = 0;
+            p.onGround = true;
+            ground = s;
+          } else if (p.vy < 0) {
+            p.y = s.y + s.h;
+            p.vy = 0;
+          } else {
+            // Resting overlap with no velocity (spawned/carried inside):
+            // escape along the smallest vertical penetration so the next
+            // X pass never sees a stale overlap and teleports sideways.
+            const penT = (p.y + PH) - s.y;
+            const penB = (s.y + s.h) - p.y;
+            if (penT < penB) { p.y = s.y - PH; p.vy = 0; p.onGround = true; ground = s; }
+            else { p.y = s.y + s.h; p.vy = 0; }
+          }
         }
       }
     }
+    // Final depenetration: knockback / soft-push / carry can leave the body
+    // inside a solid where the X "oldX" guard intentionally skips. Eject via
+    // minimum penetration so sealed areas (Box Fort interior) stay sealed.
+    this.depenetrate(p, solids);
     if (p.onGround) {
       (p as any).sliding = false;
       (p as any).wallDir = 0;
@@ -597,10 +630,65 @@ export class Match {
     }
     if (inp.down && p.onGround) p.y += 2; // squeeze through thin decks next tick
     p.x = Math.max(-60, Math.min(WORLD_W + 60, p.x));
+    // Mover / conveyor carry can shove the body into an adjacent wall.
+    this.depenetrate(p, solids);
   }
 
   private overlap(x: number, y: number, w: number, h: number, s: Solid): boolean {
     return x < s.x + s.w && x + w > s.x && y < s.y + s.h && y + h > s.y;
+  }
+
+  /** Eject a body that ended inside a solid (knockback / soft-push / carry). */
+  private depenetrate(p: PlayerState, solids: Solid[]): void {
+    for (let iter = 0; iter < 4; iter++) {
+      let hit: Solid | null = null;
+      for (const s of solids) {
+        if (this.overlap(p.x - PW / 2, p.y, PW, PH, s)) { hit = s; break; }
+      }
+      if (!hit) break;
+      const s = hit;
+      const penX = Math.min(p.x + PW / 2 - s.x, s.x + s.w - (p.x - PW / 2));
+      const penY = Math.min(p.y + PH - s.y, s.y + s.h - p.y);
+      if (penX < penY) {
+        p.x = p.x < s.x + s.w / 2 ? s.x - PW / 2 : s.x + s.w + PW / 2;
+        p.vx = 0;
+      } else {
+        if (p.y + PH / 2 < s.y + s.h / 2) {
+          p.y = s.y - PH; p.vy = 0; p.onGround = true;
+        } else {
+          p.y = s.y + s.h; p.vy = 0;
+        }
+      }
+    }
+  }
+
+  /** True when a wall sits between two points (melee / blast line-of-sight). */
+  private segmentBlocked(x1: number, y1: number, x2: number, y2: number, solids: Solid[]): boolean {
+    const dx = x2 - x1, dy = y2 - y1;
+    for (const s of solids) {
+      if (x1 > s.x && x1 < s.x + s.w && y1 > s.y && y1 < s.y + s.h) continue;
+      if (x2 > s.x && x2 < s.x + s.w && y2 > s.y && y2 < s.y + s.h) continue;
+      let tmin = 0, tmax = 1;
+      if (Math.abs(dx) < 1e-9) {
+        if (x1 < s.x || x1 > s.x + s.w) continue;
+      } else {
+        let t1 = (s.x - x1) / dx, t2 = (s.x + s.w - x1) / dx;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+        if (tmin > tmax) continue;
+      }
+      if (Math.abs(dy) < 1e-9) {
+        if (y1 < s.y || y1 > s.y + s.h) continue;
+      } else {
+        let t1 = (s.y - y1) / dy, t2 = (s.y + s.h - y1) / dy;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+        if (tmin > tmax) continue;
+      }
+      const tHit = Math.max(tmin, 0);
+      if (tmax > 0 && tmin < 1 && tHit > 0.001 && tHit < 0.999) return true;
+    }
+    return false;
   }
 
   /** Coyote jump off landed gun drops / crate tops (stand-on-gun jumps). */
@@ -654,6 +742,7 @@ export class Match {
       p.cooldown = def.melee.interval;
       const cx = p.x, cy = p.y + PH / 2;
       const aimAng = Math.atan2(dy, dx);
+      const solids = this.solids();
       for (const q of this.players) {
         if (q.id === p.id || !q.alive) continue;
         const ddx = q.x - cx, ddy = q.y + PH / 2 - cy;
@@ -663,6 +752,9 @@ export class Match {
         while (da > Math.PI) da -= Math.PI * 2;
         while (da < -Math.PI) da += Math.PI * 2;
         if (Math.abs(da) > def.melee.arc / 2 + 0.25) continue;
+        // Walls block melee: no spear/sword/fist hits through a pillar into
+        // a sealed area (Box Fort). Matches sniper cover behavior.
+        if (this.segmentBlocked(cx, cy, q.x, q.y + PH / 2, solids)) continue;
         const meleeDmg = p.boss ? def.damage * BOSS_MELEE_MULT : def.damage;
         this.damage(q, meleeDmg, p.id, dx * def.knockback, -260, p.weapon, p.y + PH / 2 < q.y + PH * 0.25);
       }
@@ -839,10 +931,14 @@ export class Match {
 
   private explode(x: number, y: number, radius: number, dmg: number, owner: number): void {
     this.events.push({ kind: "explode", a: owner });
+    const solids = this.solids();
     for (const q of this.players) {
       if (!q.alive) continue;
       const d = Math.hypot(q.x - x, q.y + PH / 2 - y);
       if (d > radius + 20) continue;
+      // Blast is blocked by walls: no knocking victims through a pillar into
+      // sealed areas. Matches sniper cover behavior.
+      if (this.segmentBlocked(x, y, q.x, q.y + PH / 2, solids)) continue;
       const fall = 1 - (d / (radius + 20)) * 0.5;
       const a = Math.atan2(q.y + PH / 2 - y, q.x - x);
       // RPG self-damage cap: own blast capped at 50 so point-blank isn't

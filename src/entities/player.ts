@@ -104,9 +104,23 @@ function probeWall(p: PlayerState, world: any, dir: number): -1 | 0 | 1 {
  * Player-player soft collision (Match convention: x centered, y top-based).
  * Overlapping alive players are pushed apart horizontally, splitting the
  * overlap. No damage, no vertical change.
+ * When solids are provided, a push that would leave a body inside a solid
+ * is clamped to the solid surface (or cancelled) so soft collision can never
+ * shove a victim through a wall into a sealed area (Box Fort interior).
  */
-export function separatePlayers(players: PlayerState[]): void {
+export function separatePlayers(
+  players: PlayerState[],
+  solids?: { x: number; y: number; w: number; h: number }[],
+): void {
   const alive = players.filter((p) => p?.alive);
+  const inside = (x: number, y: number): boolean => {
+    if (!solids) return false;
+    const l = x - PW / 2, t = y;
+    for (const s of solids) {
+      if (l < s.x + s.w && l + PW > s.x && t < s.y + s.h && t + PH > s.y) return true;
+    }
+    return false;
+  };
   for (let i = 0; i < alive.length; i++) {
     for (let j = i + 1; j < alive.length; j++) {
       const a = alive[i], b = alive[j];
@@ -117,8 +131,18 @@ export function separatePlayers(players: PlayerState[]): void {
       if (overlapX <= 0) continue;
       const push = overlapX / 2 + 0.5;
       const s = dx >= 0 ? 1 : -1;
-      a.x -= s * push;
-      b.x += s * push;
+      const nax = a.x - s * push;
+      const nbx = b.x + s * push;
+      // Wall-aware: don't push into solids. Try full push, then half, then skip.
+      if (!solids) {
+        a.x = nax;
+        b.x = nbx;
+      } else {
+        if (!inside(nax, a.y)) a.x = nax;
+        else if (!inside(a.x - s * (push / 2), a.y)) a.x -= s * (push / 2);
+        if (!inside(nbx, b.y)) b.x = nbx;
+        else if (!inside(b.x + s * (push / 2), b.y)) b.x += s * (push / 2);
+      }
     }
   }
 }

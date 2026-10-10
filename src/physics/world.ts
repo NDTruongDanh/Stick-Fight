@@ -68,6 +68,52 @@ function overlaps(a: PixelRect, b: PixelRect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
+/** Max displacement per integration substep — prevents tunneling through thin walls. */
+export const MAX_STEP = 8;
+
+/**
+ * True when the segment (x1,y1)->(x2,y2) touches any solid AABB.
+ * Used to block melee / explosion hits through walls. Solids that contain
+ * the segment start are ignored so standing on a platform doesn't self-block.
+ */
+export function segmentBlocked(
+  x1: number, y1: number, x2: number, y2: number,
+  solids: PixelRect[],
+): boolean {
+  const dx = x2 - x1, dy = y2 - y1;
+  for (const s of solids) {
+    // Shooter inside this solid (spawn overlap) — can't be cover.
+    if (x1 > s.x && x1 < s.x + s.w && y1 > s.y && y1 < s.y + s.h) continue;
+    // Target inside this solid — handled by depenetration, not cover.
+    if (x2 > s.x && x2 < s.x + s.w && y2 > s.y && y2 < s.y + s.h) continue;
+    let tmin = 0, tmax = 1;
+    if (Math.abs(dx) < 1e-9) {
+      if (x1 < s.x || x1 > s.x + s.w) continue;
+    } else {
+      let t1 = (s.x - x1) / dx, t2 = (s.x + s.w - x1) / dx;
+      if (t1 > t2) [t1, t2] = [t2, t1];
+      tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+      if (tmin > tmax) continue;
+    }
+    if (Math.abs(dy) < 1e-9) {
+      if (y1 < s.y || y1 > s.y + s.h) continue;
+    } else {
+      let t1 = (s.y - y1) / dy, t2 = (s.y + s.h - y1) / dy;
+      if (t1 > t2) [t1, t2] = [t2, t1];
+      tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+      if (tmin > tmax) continue;
+    }
+    // Ignore a touch exactly at the shooter's origin; a wall anywhere
+    // between (exclusive of endpoints) blocks the hit.
+    if (tmax > 0 && tmin < 1 && tmax > 0.001 && tmin < 0.999) {
+      // Require the hit to be strictly interior, not just grazing an endpoint.
+      const tHit = Math.max(tmin, 0);
+      if (tHit > 0.001 && tHit < 0.999) return true;
+    }
+  }
+  return false;
+}
+
 export class World {
   solids: SolidRect[] = [];
   movers: MoverDef[] = [];
@@ -146,57 +192,114 @@ export class World {
       dy: r.y - (prevDynamics[i]?.y ?? r.y),
     }));
     const crateBoxes: PixelRect[] = this.crates.map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }));
-
-    // --- X axis ---
-    body.x += body.vx * dt;
-    body.wallDir = 0;
-    const boxX: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
-    for (const s of [...solids, ...dynamics, ...crateBoxes]) {
-      if (!overlaps(boxX, s)) continue;
-      if (body.vx > 0) { body.x = s.x - body.w; body.wallDir = 1; }
-      else if (body.vx < 0) { body.x = s.x + s.w; body.wallDir = -1; }
-      else {
-        // Overlapping with no velocity (e.g. carried into a wall): push out minimally.
-        const pushL = boxX.x + boxX.w - s.x;
-        const pushR = s.x + s.w - boxX.x;
-        if (pushL < pushR) { body.x = s.x - body.w; body.wallDir = 1; }
-        else { body.x = s.x + s.w; body.wallDir = -1; }
-      }
-      body.vx = 0;
-      boxX.x = body.x;
-    }
-
-    // --- Y axis ---
-    body.y += body.vy * dt;
-    body.onGround = false;
-    let groundDyn = -1;
-    const boxY: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
-    const all: { r: PixelRect; solid: SolidRect | null; dyn: number }[] = [
+    const statics: { r: PixelRect; solid: SolidRect | null; dyn: number }[] = [
       ...solids.map((r) => ({ r, solid: r as SolidRect, dyn: -1 })),
       ...dynamics.map((r, i) => ({ r, solid: null, dyn: i })),
       ...crateBoxes.map((r) => ({ r, solid: null, dyn: -1 })),
     ];
-    for (const { r, solid, dyn } of all) {
-      if (!overlaps(boxY, r)) continue;
-      if (body.vy > 0) {
-        body.y = r.y - body.h;
-        body.onGround = true;
-        groundDyn = dyn;
-        if (solid?.type === 'bouncy') {
-          body.vy = -1300;
-          body.onGround = false;
-          groundDyn = -1;
-        } else if (solid?.type === 'conveyor') {
-          body.x += solid.beltSpeed * WORLD_W * dt;
+    const colliders: PixelRect[] = statics.map((s) => s.r);
+
+    // Substep so a single frame can never jump over a thin wall.
+    const dist = Math.max(Math.abs(body.vx * dt), Math.abs(body.vy * dt));
+    const steps = Math.max(1, Math.min(8, Math.ceil(dist / MAX_STEP)));
+    const h = dt / steps;
+    body.wallDir = 0;
+    body.onGround = false;
+    let groundDyn = -1;
+
+    for (let st = 0; st < steps; st++) {
+      // --- X axis (only when X motion caused the overlap — a pre-existing
+      // vertical overlap from jumping up into a platform must not eject the
+      // body sideways to the platform edge; Y owns that axis). ---
+      const oldX = body.x;
+      body.x += body.vx * h;
+      const boxX: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
+      const wasX: PixelRect = { x: oldX, y: body.y, w: body.w, h: body.h };
+      for (const s of colliders) {
+        if (!overlaps(boxX, s)) continue;
+        if (overlaps(wasX, s)) continue;
+        if (body.vx > 0) { body.x = s.x - body.w; body.wallDir = 1; }
+        else if (body.vx < 0) { body.x = s.x + s.w; body.wallDir = -1; }
+        else {
+          // Overlapping with no velocity (e.g. carried into a wall): push out minimally.
+          const pushL = boxX.x + boxX.w - s.x;
+          const pushR = s.x + s.w - boxX.x;
+          if (pushL < pushR) { body.x = s.x - body.w; body.wallDir = 1; }
+          else { body.x = s.x + s.w; body.wallDir = -1; }
+        }
+        body.vx = 0;
+        boxX.x = body.x;
+      }
+
+      // --- Y axis ---
+      body.y += body.vy * h;
+      const boxY: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
+      for (const { r, solid, dyn } of statics) {
+        if (!overlaps(boxY, r)) continue;
+        if (body.vy > 0) {
+          body.y = r.y - body.h;
+          body.onGround = true;
+          groundDyn = dyn;
+          if (solid?.type === 'bouncy') {
+            body.vy = -1300;
+            body.onGround = false;
+            groundDyn = -1;
+          } else if (solid?.type === 'conveyor') {
+            body.x += solid.beltSpeed * WORLD_W * h;
+            body.vy = 0;
+          } else {
+            body.vy = 0;
+          }
+        } else if (body.vy < 0) {
+          body.y = r.y + r.h;
           body.vy = 0;
         } else {
+          // Resting overlap with no velocity (spawned/carried inside):
+          // escape along the smallest vertical penetration so the next
+          // X pass never sees a stale overlap and teleports sideways.
+          const penT = (boxY.y + boxY.h) - r.y;
+          const penB = (r.y + r.h) - boxY.y;
+          if (penT < penB) {
+            body.y = r.y - body.h;
+            body.onGround = true;
+            groundDyn = dyn;
+            body.vy = 0;
+          } else {
+            body.y = r.y + r.h;
+            body.vy = 0;
+          }
+        }
+        boxY.y = body.y;
+      }
+    }
+    // --- Final depenetration: knockback / mover carry / player-vs-player
+    // pushes can leave the body inside a solid where the X "wasX" guard
+    // above intentionally skips. Eject along the minimum-penetration axis
+    // so a sealed fort (Box Fort interior) can never be entered or camped.
+    for (let iter = 0; iter < 4; iter++) {
+      const box: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
+      let hit: PixelRect | null = null;
+      for (const s of colliders) {
+        if (overlaps(box, s)) { hit = s; break; }
+      }
+      if (!hit) break;
+      const s = hit;
+      const penX = Math.min(box.x + box.w - s.x, s.x + s.w - box.x);
+      const penY = Math.min(box.y + box.h - s.y, s.y + s.h - box.y);
+      if (penX < penY) {
+        if (box.x + box.w / 2 < s.x + s.w / 2) { body.x = s.x - body.w; body.wallDir = 1; }
+        else { body.x = s.x + s.w; body.wallDir = -1; }
+        body.vx = 0;
+      } else {
+        if (box.y + box.h / 2 < s.y + s.h / 2) {
+          body.y = s.y - body.h;
+          body.onGround = true;
+          body.vy = 0;
+        } else {
+          body.y = s.y + s.h;
           body.vy = 0;
         }
-      } else if (body.vy < 0) {
-        body.y = r.y + r.h;
-        body.vy = 0;
       }
-      boxY.y = body.y;
     }
     body.groundMover = groundDyn;
     // Mover carry: standing on a moving platform drags the body by the
@@ -210,6 +313,33 @@ export class World {
         } else {
           const rot = this.rotators[groundDyn - this.movers.length];
           if (rot) body.x += rot.angleSpeed * ROTATOR_CARRY * dt;
+        }
+      }
+    }
+    // Carry can shove the body into an adjacent wall — sweep once more so
+    // the final state is never inside a solid.
+    for (let iter = 0; iter < 2; iter++) {
+      const box: PixelRect = { x: body.x, y: body.y, w: body.w, h: body.h };
+      let hit: PixelRect | null = null;
+      for (const s of colliders) {
+        if (overlaps(box, s)) { hit = s; break; }
+      }
+      if (!hit) break;
+      const s = hit;
+      const penX = Math.min(box.x + box.w - s.x, s.x + s.w - box.x);
+      const penY = Math.min(box.y + box.h - s.y, s.y + s.h - box.y);
+      if (penX < penY) {
+        if (box.x + box.w / 2 < s.x + s.w / 2) { body.x = s.x - body.w; body.wallDir = 1; }
+        else { body.x = s.x + s.w; body.wallDir = -1; }
+        body.vx = 0;
+      } else {
+        if (box.y + box.h / 2 < s.y + s.h / 2) {
+          body.y = s.y - body.h;
+          body.onGround = true;
+          body.vy = 0;
+        } else {
+          body.y = s.y + s.h;
+          body.vy = 0;
         }
       }
     }
