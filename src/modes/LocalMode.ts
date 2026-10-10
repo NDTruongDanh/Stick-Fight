@@ -74,6 +74,7 @@ export class LocalMode {
   private fuses: { x: number; y: number; t: number; r: number; dmg: number; owner: number }[] = [];
   private parts: Part[] = []; private feed: string[] = []; private beams: Beam[] = [];
   private levelIdx = 0; private time = 0; private round = 1;
+  private rotation: LevelDef[] = LEVELS; private hasCustom = false;
   private banner = ''; private bannerT = 0; private roundLock = 0;
   private matchOver = false; private frozen = false; private paused = false;
   private showHelp = false;
@@ -85,11 +86,16 @@ export class LocalMode {
   private lastPickup = new Map<number, number>();
   private get winScore(): number { return this.opts.winsTarget ?? WIN_SCORE_DEFAULT; }
 
-  constructor(private canvas: HTMLCanvasElement, private opts: { humans: number; bots: number; winsTarget?: number }) {
+  constructor(private canvas: HTMLCanvasElement, private opts: { humans: number; bots: number; winsTarget?: number; customLevel?: LevelDef }) {
     const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('no 2d context'); this.ctx = ctx; let seed = 12345; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647; this.deco = Array.from({ length: 70 }, () => ({ x: rnd() * W, y: rnd() * H * 0.7, s: 1 + rnd() * 3 }));
     const total = Math.min(4, Math.max(1, opts.humans + opts.bots));
     const nH = Math.min(opts.humans, 2);
     for (let i = 0; i < total; i++) this.players.push({ id: i, name: i === 0 && opts.humans > 0 ? 'YOU' : PLAYER_NAMES[i], color: PLAYER_COLORS[i], x: 0, y: 0, vx: 0, vy: 0, hp: PLAYER_HP, alive: true, weapon: 'fists', ammo: -1, cd: 0, face: i % 2 === 0 ? 1 : -1, ax: 0, ay: 0, onGround: false, wins: 0, bot: i >= nH, walk: 0, flash: 0, swing: 0, block: false, dropT: 0, fireHeld: false, prevFire: false, ground: '', st: 0, burnT: 0, invuln: 0, squash: 0, deadT: 0, muzzle: 0, boss: false, maxHp: PLAYER_HP, stompCd: 0 });
+    // Custom editor level (trusted editor output) goes first in the rotation.
+    if (opts.customLevel) {
+      this.rotation = [{ ...opts.customLevel, id: 'custom' }, ...LEVELS];
+      this.hasCustom = true;
+    }
   }
 
   start(): void {
@@ -112,7 +118,7 @@ export class LocalMode {
     window.addEventListener('mousedown', md); window.addEventListener('mouseup', mu); this.canvas.addEventListener('contextmenu', cx);
     this.off = [() => window.removeEventListener('keydown', kd), () => window.removeEventListener('keyup', ku), () => window.removeEventListener('mousemove', mm), () => window.removeEventListener('mousedown', md), () => window.removeEventListener('mouseup', mu), () => this.canvas.removeEventListener('contextmenu', cx)];
     this.levelIdx = 0; this.round = 1; this.spawnAll();
-    this.banner = this.bossBanner() ?? `${LEVELS[0].name} — ROUND 1`; this.bannerT = 2; this.last = performance.now();
+    this.banner = this.bossBanner() ?? `${this.levelLabel()} — ROUND 1`; this.bannerT = 2; this.last = performance.now();
     const loop = (t: number) => { if (!this.running) return; this.update(Math.min(0.033, (t - this.last) / 1000)); this.render(); this.last = t; this.raf = requestAnimationFrame(loop); };
     this.raf = requestAnimationFrame(loop);
   }
@@ -120,14 +126,19 @@ export class LocalMode {
   stop(): void { this.running = false; cancelAnimationFrame(this.raf); this.off.forEach((f) => f()); this.off = []; this.clearRematchBtn(); }
 
   getHudState(): HudState {
-    return { players: this.players.map((p) => ({ name: p.name, color: p.color, wins: p.wins, alive: p.alive, ammo: p.ammo, weapon: p.weapon })), round: this.round, levelName: LEVELS[this.levelIdx].name, msg: this.bannerT > 0 ? this.banner : undefined, killfeed: [...this.feed] };
+    return { players: this.players.map((p) => ({ name: p.name, color: p.color, wins: p.wins, alive: p.alive, ammo: p.ammo, weapon: p.weapon })), round: this.round, levelName: this.levelLabel(), msg: this.bannerT > 0 ? this.banner : undefined, killfeed: [...this.feed] };
   }
 
-  private level(): LevelDef { return LEVELS[this.levelIdx]; }
+  private level(): LevelDef { return this.rotation[this.levelIdx]; }
+
+  /** Display name for banners/HUD: the custom slot always shows as CUSTOM. */
+  private levelLabel(): string {
+    return this.hasCustom && this.levelIdx === 0 ? 'CUSTOM' : this.level().name;
+  }
 
   private resetMatch(): void {
     this.players.forEach((p) => (p.wins = 0)); this.round = 1; this.levelIdx = 0; this.matchOver = false; this.frozen = false; this.paused = false;
-    this.spawnAll(); this.banner = this.bossBanner() ?? `${LEVELS[0].name} — ROUND 1`; this.bannerT = 2;
+    this.spawnAll(); this.banner = this.bossBanner() ?? `${this.levelLabel()} — ROUND 1`; this.bannerT = 2;
     this.clearRematchBtn();
   }
 
@@ -564,13 +575,13 @@ export class LocalMode {
       if (this.matchOver) { this.frozen = true; return; }
       this.round++;
       // Random (non-sequential) next arena, like the original.
-      if (LEVELS.length > 1) {
+      if (this.rotation.length > 1) {
         let n = this.levelIdx;
-        do { n = (Math.random() * LEVELS.length) | 0; } while (n === this.levelIdx);
+        do { n = (Math.random() * this.rotation.length) | 0; } while (n === this.levelIdx);
         this.levelIdx = n;
       }
       this.spawnAll(); // clears projectiles, fresh spawns
-      this.banner = this.bossBanner() ?? `${this.level().name} — ROUND ${this.round}`; this.bannerT = 2;
+      this.banner = this.bossBanner() ?? `${this.levelLabel()} — ROUND ${this.round}`; this.bannerT = 2;
       return;
     }
     // Boss survive timer: boss alive for 45s wins the round.

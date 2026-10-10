@@ -1,6 +1,8 @@
 import './styles.css';
 import { Ui, getWinsTarget, normalizeWsUrl } from './ui/screens.js';
 import type { HudState } from './ui/hud.js';
+import type { LevelDef } from '../shared/types.js';
+import { blankLevel, exportLevel, loadCustom } from './levels/editor.js';
 import { PLAYER_COLORS } from '../shared/constants.js';
 
 const W = 1280;
@@ -68,10 +70,11 @@ function showMenu(): void {
     onHost: () => showHostSetup(),
     onJoin: () => showJoinSetup(),
     onHow: () => ui.showHow({ onBack: showMenu }),
+    onEditor: () => showEditor(),
   });
 }
 
-async function startLocal(humans: number, bots: boolean): Promise<void> {
+async function startLocal(humans: number, bots: boolean, customLevel?: LevelDef): Promise<void> {
   stopMode();
   ui.clear();
   canvas.width = W; canvas.height = H; // OnlineMode may have resized the backing store
@@ -79,7 +82,7 @@ async function startLocal(humans: number, bots: boolean): Promise<void> {
     const { LocalMode } = await import('./modes/LocalMode.js');
     const total = Math.min(4, Math.max(1, humans + (bots ? 1 : 0)));
     const botCount = Math.max(total - Math.min(humans, 2), bots ? 1 : 0);
-    const m = new LocalMode(canvas, { humans: Math.min(humans, 4), bots: botCount, winsTarget: getWinsTarget() }) as Mode;
+    const m = new LocalMode(canvas, { humans: Math.min(humans, 4), bots: botCount, winsTarget: getWinsTarget(), ...(customLevel ? { customLevel } : {}) }) as Mode;
     mode = m;
     if (m.onQuit !== undefined) m.onQuit = showMenu;
     ui.showHud(() => m.getHudState?.() ?? { players: [], round: 1, levelName: '' });
@@ -90,6 +93,14 @@ async function startLocal(humans: number, bots: boolean): Promise<void> {
     ui.toast('Failed to start local game');
     showMenu();
   }
+}
+
+function showEditor(): void {
+  stopMode();
+  ui.showEditor(exportLevel(loadCustom() ?? blankLevel()), {
+    onSave: (level) => void startLocal(2, true, level),
+    onBack: showMenu,
+  });
 }
 
 function showHostSetup(): void {

@@ -104,6 +104,23 @@ third-party firewall) must allow them for the current network profile.
 
 P2 uses auto-aim at the nearest enemy. Extra local humans beyond 2 become bots.
 
+## Level editor
+
+Click **LEVEL EDITOR** on the menu to paste or edit level JSON, then
+**VALIDATE**, **SAVE & PLAY**, or **CLEAR** (resets to a blank level).
+
+- All coordinates are normalized `0..1` (`x`: 0 = left, 1 = right;
+  `y`: 0 = top, 1 = bottom). Boxes (`platforms`, `movers`, `crates`,
+  `killRects`) need `x/y/w/h` with `x+w ≤ 1` and `y+h ≤ 1`.
+- `spawns` must be exactly 4 `[x, y]` points inside the arena — keep them
+  out of solids and hazards. `weaponDrops` needs at least 1 point; drops
+  fall from the sky and land on platforms.
+- **SAVE & PLAY** stores the map in `localStorage` (`sf_custom`) and starts
+  a local match (2 humans + bots) with your map first in the rotation —
+  the banner shows `CUSTOM — ROUND n`.
+- Share maps by copy-pasting the JSON (the editor opens with your last
+  saved map, or a blank starter when none is saved).
+
 ## Features
 
 - Local multiplayer (1–4 fighters, keyboard + bots) with 12 rotating arenas:
@@ -126,6 +143,8 @@ P2 uses auto-aim at the nearest enemy. Extra local humans beyond 2 become bots.
 - Online LAN mode: authoritative 60 Hz server, client prediction + snapshots,
   host/join lobby flow, ping display
 - Keyboard bots with seek / aim / jump / block behavior
+- Minimal level editor (menu → LEVEL EDITOR): JSON validate / save / clear,
+  custom map plays first in the local rotation, shareable via copy-paste
 
 ## Roadmap
 

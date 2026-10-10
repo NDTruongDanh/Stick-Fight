@@ -1,19 +1,19 @@
 import { renderHud, type HudState } from './hud.js';
 import { LEVELS } from '../levels/levels.js';
+import type { LevelDef } from '../../shared/types.js';
+import { blankLevel, clearCustom, exportLevel, importLevel, loadCustom, saveCustom } from '../levels/editor.js';
 
 export interface MenuHandlers {
   onLocal(n: number, bots: boolean): void;
   onHost(): void;
   onJoin(): void;
   onHow(): void;
+  onEditor(): void;
 }
 
 // Match config: wins target stepper (3/5/10, default 5) persisted to localStorage.
-// NOTE: display-only for now. LocalMode's constructor only accepts
-// `{ humans, bots }` (src/modes/LocalMode.ts, owned by another workstream),
-// so the engine still plays first-to-WIN_SCORE_DEFAULT (5). Once LocalMode
-// accepts an optional `winsTarget`, read getWinsTarget() in main.ts and pass
-// it through — no UI changes needed.
+// main.ts reads getWinsTarget() and passes it as LocalMode's `winsTarget` opt
+// (first to target takes the match).
 export const WINS_OPTIONS = [3, 5, 10] as const;
 const WINS_KEY = 'sf_wins';
 
@@ -82,6 +82,26 @@ export interface LobbyPlayer {
   name: string;
   color: string;
   bot: boolean;
+}
+
+export interface EditorHandlers {
+  onSave(level: LevelDef): void;
+  onBack(): void;
+}
+
+const EDITOR_TIPS = `All coords are normalized 0..1 (x: 0 = left, 1 = right; y: 0 = top, 1 = bottom).
+Boxes (platforms, movers, crates, killRects) need x/y/w/h with x+w ≤ 1 and y+h ≤ 1.
+Spawns must be exactly 4 [x, y] points inside the arena — avoid putting them
+inside solids or hazards. weaponDrops need at least 1 point; drops fall from
+the sky and land on platforms. Save &amp; Play puts your map first in the
+local rotation (banner shows CUSTOM). Copy-paste the JSON to share it.`;
+
+function editorErrorsHTML(errors: string[]): string {
+  if (errors.length === 0) {
+    return `<p class="text-[12px] text-green-300">✓ Valid level — ready to save.</p>`;
+  }
+  const items = errors.map((e) => `<li>${esc(e)}</li>`).join('');
+  return `<ul class="list-disc pl-5 text-[12px] text-red-300 max-h-28 overflow-auto">${items}</ul>`;
 }
 
 export interface LobbyInfo {
@@ -254,8 +274,17 @@ export class Ui {
 
   showMenu(cb: MenuHandlers): void {
     const state = { humans: 2, bots: true, wins: getWinsTarget() };
+    let customNote = '';
+    try {
+      if (loadCustom()) {
+        customNote = `<p class="text-center text-[12px] text-green-300 mb-1">custom map saved — EDITOR → SAVE &amp; PLAY to fight on it</p>`;
+      }
+    } catch {
+      /* storage unavailable — no note */
+    }
     this.shell(`${title('a clone for LAN parties')}
       <p class="text-center text-[12px] text-neutral-400 -mt-2 mb-1">${LEVELS.length} rotating arenas · random every round</p>
+      ${customNote}
       <div class="flex flex-col gap-2.5 my-4">
         ${stepperHTML('humans', 'Local humans (rest become bots)', 1, 4, state.humans)}
         ${botToggleHTML(state.bots)}
@@ -267,7 +296,10 @@ export class Ui {
           <button id="m-host" class="${BTN_BLUE}">HOST</button>
           <button id="m-join" class="${BTN_GREEN}">JOIN</button>
         </div>
-        <button id="m-how" class="${BTN_GHOST}">HOW TO PLAY</button>
+        <div class="grid grid-cols-2 gap-2.5">
+          <button id="m-how" class="${BTN_GHOST}">HOW TO PLAY</button>
+          <button id="m-editor" class="${BTN_GHOST}">LEVEL EDITOR</button>
+        </div>
       </div>
       ${footerHTML()}`);
     wireSteppers(this.screen, state, 1, 4);
@@ -278,6 +310,7 @@ export class Ui {
     (q('#m-host') as HTMLButtonElement).onclick = () => cb.onHost();
     (q('#m-join') as HTMLButtonElement).onclick = () => cb.onJoin();
     (q('#m-how') as HTMLButtonElement).onclick = () => cb.onHow();
+    (q('#m-editor') as HTMLButtonElement).onclick = () => cb.onEditor();
   }
 
   showSetup(titleText: string, cb: (d: SetupData) => void, opts: SetupOpts = {}): void {
@@ -384,6 +417,58 @@ export class Ui {
       true,
     );
     (this.screen.querySelector('#h-back') as HTMLButtonElement).onclick = () => cb.onBack();
+  }
+
+  /** Minimal level editor: JSON textarea + Validate / Save&Play / Clear + tips. */
+  showEditor(initial: string, cb: EditorHandlers): void {
+    this.shell(
+      `<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-1">LEVEL EDITOR</h2>
+      <p class="text-center text-neutral-400 text-sm mb-3">paste or edit level JSON, validate, then save &amp; play</p>
+      <textarea id="ed-json" spellcheck="false" class="${INPUT} font-mono !text-[11px] leading-relaxed h-56 resize-y">${esc(initial)}</textarea>
+      <div id="ed-errors" class="mt-2 min-h-6"></div>
+      <div class="grid grid-cols-3 gap-2.5 mt-2">
+        <button id="ed-validate" class="${BTN_BLUE} !px-2">VALIDATE</button>
+        <button id="ed-save" class="${BTN_YELLOW} !px-2">SAVE &amp; PLAY</button>
+        <button id="ed-clear" class="${BTN_GHOST} !px-2">CLEAR</button>
+      </div>
+      <button id="ed-back" class="${BTN_GHOST} w-full mt-2.5">BACK</button>
+      <p class="text-[11px] text-neutral-400 whitespace-pre-line mt-3">${EDITOR_TIPS}</p>`,
+      true,
+    );
+    const area = this.screen.querySelector<HTMLTextAreaElement>('#ed-json');
+    const errBox = this.screen.querySelector<HTMLElement>('#ed-errors');
+    const showErrors = (errors: string[]) => {
+      if (errBox) errBox.innerHTML = editorErrorsHTML(errors);
+    };
+    const currentText = (): string => area?.value ?? '';
+    (this.screen.querySelector('#ed-validate') as HTMLButtonElement).onclick = () => {
+      try {
+        importLevel(currentText());
+        showErrors([]);
+        this.toast('Level is valid');
+      } catch (err) {
+        showErrors(err instanceof Error ? err.message.replace(/^Invalid level:\n/, '').split('\n- ') : [String(err)]);
+      }
+    };
+    (this.screen.querySelector('#ed-save') as HTMLButtonElement).onclick = () => {
+      try {
+        const level = importLevel(currentText());
+        saveCustom(level);
+        showErrors([]);
+        this.toast('Custom level saved — good luck!');
+        cb.onSave(level);
+      } catch (err) {
+        showErrors(err instanceof Error ? err.message.replace(/^Invalid level:\n/, '').split('\n- ') : [String(err)]);
+        this.toast('Fix the errors before saving');
+      }
+    };
+    (this.screen.querySelector('#ed-clear') as HTMLButtonElement).onclick = () => {
+      clearCustom();
+      if (area) area.value = exportLevel(blankLevel());
+      showErrors([]);
+      this.toast('Editor reset to a blank level');
+    };
+    (this.screen.querySelector('#ed-back') as HTMLButtonElement).onclick = () => cb.onBack();
   }
 
   /** Pause menu overlay with resume / restart / quit. */
