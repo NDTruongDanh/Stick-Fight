@@ -1,5 +1,5 @@
 import { NetClient } from "../net/NetClient.js";
-import type { SnapshotMsg } from "../net/NetClient.js";
+import type { RosterPlayer, SnapshotMsg } from "../net/NetClient.js";
 import { Predictor } from "../net/predict.js";
 import type { PredictedInput } from "../net/predict.js";
 import {
@@ -83,7 +83,7 @@ export class OnlineMode {
   private mouse = { x: 0, y: 0, down: false, rdown: false };
   private prevThrow = false;
   private feed: string[] = [];
-  private roster: { id: number; name: string; bot: boolean }[] = [];
+  private roster: RosterPlayer[] = [];
   private lastFrame = 0;
   private sfx = new Sfx();
   private shake = 0;
@@ -137,12 +137,22 @@ export class OnlineMode {
       this.pushFeed("match started!");
     };
     this.net.onRoster = (r) => {
-      this.roster = r.players;
+      this.roster = r.players as RosterPlayer[];
     };
     this.net.onChat = (c) => this.pushFeed(`${c.from}: ${c.text}`);
     this.net.onClose = () => {
-      // Auto-reconnect (once) is handled inside NetClient; note it in feed.
-      this.pushFeed("connection lost — retrying…");
+      const err = this.net.lastError;
+      // Fatal rejects (kick/full/version) carry the server reason — surface it
+      // via the existing feed path instead of the generic retry line.
+      if (err && /kick|full|version|exhausted/i.test(err)) {
+        this.pushFeed(err);
+      } else {
+        // Auto-reconnect (up to 5x, backoff) is handled inside NetClient.
+        this.pushFeed("connection lost — retrying…");
+      }
+    };
+    this.net.onReconnect = (attempt) => {
+      this.pushFeed(`reconnecting… (attempt ${attempt})`);
     };
     this.net.onMatchEnd = (wins) => {
       const best = Object.entries(wins).sort((a, b) => b[1] - a[1])[0];
@@ -218,6 +228,12 @@ export class OnlineMode {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(e.code)) e.preventDefault();
     this.keys.add(e.code);
+    // Lobby quick-ready: T toggles /ready ↔ /unready (host chat command).
+    // Gated to pre-start so in-game T presses never spam chat.
+    if (e.code === "KeyT" && !e.repeat && !this.started) {
+      const me = this.roster.find((p) => p.id === this.net.clientId);
+      this.net.sendChat(me?.ready ? "/unready" : "/ready");
+    }
   };
   private onKeyUp = (e: KeyboardEvent): void => {
     this.keys.delete(e.code);
@@ -773,7 +789,24 @@ export class OnlineMode {
     const dpr = this.canvas.width / Math.max(1, this.canvas.getBoundingClientRect().width);
     void dpr;
     if (!snap) {
-      ctx.fillText("connecting…", 18, 34);
+      const err = this.net.lastError;
+      if (err && /kick|full|version|exhausted/i.test(err)) {
+        ctx.fillStyle = "#f87171";
+        ctx.fillText(err.slice(0, 42), 18, 34);
+      } else {
+        ctx.fillStyle = "#fff";
+        ctx.fillText("connecting…", 18, 34);
+      }
+      if (this.roster.length && !this.started) {
+        const humans = this.roster.filter((p) => !p.bot);
+        const ready = humans.filter((p) => p.ready).length;
+        ctx.fillStyle = "#fff";
+        ctx.fillText(`lobby ${this.roster.length}/4 · ${ready}/${humans.length} ready — press T`, 18, 52);
+      }
+      if (!this.started && this.net.reconnectAttempts > 0) {
+        ctx.fillStyle = "#facc15";
+        ctx.fillText(`reconnecting… (attempt ${this.net.reconnectAttempts})`, 18, 68);
+      }
       return;
     }
     // hp pips
@@ -801,21 +834,39 @@ export class OnlineMode {
     ctx.textAlign = "left";
     ctx.fillStyle = "#93c5fd";
     const winsById = new Map(snap.players.map((p) => [p.id, p.wins]));
+    const readyById = new Map(this.roster.map((p) => [p.id, !!p.ready]));
     this.roster.slice(0, 4).forEach((r, i) => {
       const w = winsById.get(r.id) ?? 0;
-      ctx.fillText(`${r.bot ? "[bot]" : ""}${r.name} ★${w}`, 18, ch - 90 + i * 16);
+      const mark = !this.started && readyById.get(r.id) ? " ✓" : "";
+      ctx.fillText(`${r.bot ? "[bot]" : ""}${r.name} ★${w}${mark}`, 18, ch - 90 + i * 16);
     });
     ctx.fillStyle = "#e5e7eb";
     this.feed.slice(-5).forEach((f, i) => {
       ctx.fillText(f.slice(0, 60), 18, ch - 24 - (this.feed.slice(-5).length - 1 - i) * 16);
     });
     if (!this.started) {
+      const total = this.roster.length;
+      const humans = this.roster.filter((p) => !p.bot);
+      const ready = humans.filter((p) => p.ready).length;
+      const meReady = !!this.roster.find((p) => p.id === this.net.clientId)?.ready;
+      const err = this.net.lastError;
+      const fatal = err && /kick|full|version|exhausted/i.test(err) ? err : null;
       ctx.fillStyle = "rgba(0,0,0,0.6)";
-      ctx.fillRect(cw / 2 - 220, ch / 2 - 30, 440, 60);
-      ctx.fillStyle = "#fff";
+      ctx.fillRect(cw / 2 - 220, ch / 2 - 42, 440, fatal ? 96 : 76);
       ctx.textAlign = "center";
       ctx.font = "15px monospace";
-      ctx.fillText("waiting for players… (need 2 to start)", cw / 2, ch / 2 + 5);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(`lobby ${total}/4 · ${ready}/${humans.length} ready`, cw / 2, ch / 2 - 10);
+      ctx.fillStyle = meReady ? "#4ade80" : "#facc15";
+      ctx.fillText(
+        meReady ? "you're READY ✓ — press T to unready" : "press T when ready",
+        cw / 2, ch / 2 + 14,
+      );
+      if (fatal) {
+        ctx.fillStyle = "#f87171";
+        ctx.font = "12px monospace";
+        ctx.fillText(fatal.slice(0, 60), cw / 2, ch / 2 + 34);
+      }
     }
     if (me && !me.alive) {
       ctx.fillStyle = "#fff";
