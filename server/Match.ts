@@ -69,6 +69,7 @@ interface GunDef {
   bounce?: number;
   melee?: { range: number; arc: number; interval: number };
   explosive?: { radius: number; damage: number };
+  beam?: boolean;
 }
 
 const F = (p: Partial<GunDef> & Pick<GunDef, "damage" | "interval" | "mag" | "speed">): GunDef => ({
@@ -82,27 +83,27 @@ const F = (p: Partial<GunDef> & Pick<GunDef, "damage" | "interval" | "mag" | "sp
 export const WEAPONS: Record<WeaponId, GunDef> = buildCanonicalWeapons();
 
 function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
-  // Per-weapon projectile tuning not present in the canonical defs
-  // (fuse / gravity / life / bounce are mode-level behavior).
+  // Per-weapon projectile tuning. Lives aligned with LocalMode TUNE so both
+  // modes feel identical (bouncer 2.5/bounce-6, flamethrower 0.32, etc).
   const tune: Record<WeaponId, Partial<GunDef>> = {
     fists: {},
-    pistol: { life: 2 },
-    revolver: { life: 2 },
-    deagle: { life: 2 },
-    uzi: { life: 2 },
-    ak47: { life: 2 },
-    m16: { life: 2 },
-    sniper: { life: 2 },
-    shotgun: { life: 1.4 },
-    sawedoff: { life: 1.2 },
+    pistol: { life: 1.6 },
+    revolver: { life: 1.6 },
+    deagle: { life: 1.6 },
+    uzi: { life: 1.4 },
+    ak47: { life: 1.5 },
+    m16: { life: 1.5 },
+    sniper: { life: 1.6 },
+    shotgun: { life: 1.1 },
+    sawedoff: { life: 1.0 },
     bouncer: { life: 2.5, bounce: 6 },
-    minigun: { life: 2 },
-    grenade: { life: 3.2, gravity: 1500, explosive: { radius: 130, damage: 65 } },
-    rpg: { life: 3, gravity: 200, explosive: { radius: 150, damage: 80 } },
-    flamethrower: { life: 0.28 },
+    minigun: { life: 1.3 },
+    grenade: { life: 3.2, gravity: 2400, explosive: { radius: 130, damage: 65 } },
+    rpg: { life: 3, gravity: 288, explosive: { radius: 150, damage: 80 } },
+    flamethrower: { life: 0.32 },
     sword: {},
     spear: {},
-    laser: { life: 2 },
+    laser: { life: 1.6 },
   };
   const out = {} as Record<WeaponId, GunDef>;
   (Object.keys(CANON_WEAPONS) as WeaponId[]).forEach((id) => {
@@ -123,6 +124,7 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
       bounce: t.bounce ?? c.bounce,
       melee: c.melee ? { ...c.melee } : undefined,
       explosive: c.explosive ? { radius: c.explosive.radius, damage: t.explosive?.damage ?? c.damage } : t.explosive,
+      beam: !!c.beam,
     };
   });
   return out;
@@ -140,6 +142,8 @@ interface Proj extends ProjectileState {
   gravity?: number;
   explosiveDmg?: number;
   explosiveRadius?: number;
+  fuse?: number;
+  ammo?: number;
 }
 
 interface Solid {
@@ -164,6 +168,9 @@ export class Match {
   private nextBotId = -1;
   private dropTimer = 2;
   private dropIndex = 0;
+  private dropRespawns: number[] = [];
+  private burns = new Map<number, number>();
+  private burnOwners = new Map<number, number>();
   private resetTimer = -1;
   private prevJump = new Map<number, boolean>();
   private prevThrow = new Map<number, boolean>();
@@ -230,6 +237,24 @@ export class Match {
       this.dropTimer = DROP_INTERVAL;
       this.spawnDrop();
     }
+    // Delayed respawns for drops lost to lava/void.
+    for (let i = this.dropRespawns.length - 1; i >= 0; i--) {
+      this.dropRespawns[i] -= dt;
+      if (this.dropRespawns[i] <= 0) {
+        this.dropRespawns.splice(i, 1);
+        this.spawnDrop();
+      }
+    }
+
+    // Flamethrower burn DoT (12 dps for 1.2s, refreshable) — matches LocalMode.
+    for (const p of this.players) {
+      const bt = this.burns.get(p.id) ?? 0;
+      if (bt > 0 && p.alive) {
+        if (bt - dt <= 0) this.burns.delete(p.id);
+        else this.burns.set(p.id, bt - dt);
+        this.damage(p, 12 * dt, this.burnOwners.get(p.id) ?? p.id, 0, 0, "burn");
+      }
+    }
 
     // Players
     for (const p of this.players) {
@@ -263,6 +288,8 @@ export class Match {
     this.projectiles = [];
     this.drops = [];
     this.dropTimer = 2;
+    this.burns.clear();
+    this.burnOwners.clear();
     this.crates = (this.level.crates ?? []).map((c) => ({
       x: (c.x * WORLD_W) | 0, y: (c.y * WORLD_H) | 0,
       w: Math.max(20, c.w * WORLD_W), h: Math.max(20, c.h * WORLD_H),
@@ -291,14 +318,16 @@ export class Match {
   }
 
   private spawnDrop(): void {
+    // Drops fall from the sky (original Stick Fight style): fixed x from the
+    // level's drop spots, y near the top, gravity + sway do the rest.
     const spots = this.level.weaponDrops.length ? this.level.weaponDrops : [[0.5, 0.2]];
     const s = spots[this.dropIndex++ % spots.length];
     const weapon = DROP_CYCLE[(Math.random() * DROP_CYCLE.length) | 0];
     if (this.drops.length >= MAX_DROPS) this.drops.shift();
     this.drops.push({
-      x: s[0] * WORLD_W, y: s[1] * WORLD_H,
-      vx: (Math.random() - 0.5) * 120, vy: -80,
-      weapon, ammo: WEAPONS[weapon].mag * 2 || WEAPONS[weapon].mag,
+      x: s[0] * WORLD_W, y: WORLD_H * 0.02,
+      vx: (Math.random() - 0.5) * 120, vy: 0,
+      weapon, ammo: WEAPONS[weapon].mag,
     });
     this.events.push({ kind: "drop", text: weapon });
   }
@@ -349,7 +378,7 @@ export class Match {
     p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
     const wasGround = p.onGround;
     const prevJump = this.prevJump.get(p.id) ?? false;
-    if (inp.jump && !prevJump && p.onGround) {
+    if (inp.jump && !prevJump && (p.onGround || this.propTop(p))) {
       p.vy = -JUMP_SPEED;
       p.onGround = false;
     }
@@ -399,6 +428,32 @@ export class Match {
     return x < s.x + s.w && x + w > s.x && y < s.y + s.h && y + h > s.y;
   }
 
+  /** Coyote jump off landed gun drops / crate tops (stand-on-gun jumps). */
+  private propTop(p: PlayerState): boolean {
+    const feet = p.y + PH;
+    for (const d of this.drops) {
+      if (d.vy === 0 && Math.abs(d.x - p.x) < 30 && Math.abs(d.y - feet) <= 8) return true;
+    }
+    for (const c of this.crates) {
+      if (p.x + PW / 2 > c.x && p.x - PW / 2 < c.x + c.w && Math.abs(feet - c.y) <= 8) return true;
+    }
+    return false;
+  }
+
+  private inLava(x: number, y: number): boolean {
+    for (const pl of this.level.platforms) {
+      if (pl.type !== "lava") continue;
+      const sx = pl.x * WORLD_W, sy = pl.y * WORLD_H;
+      if (x > sx && x < sx + pl.w * WORLD_W && y > sy && y < sy + pl.h * WORLD_H) return true;
+    }
+    for (const k of this.level.killRects ?? []) {
+      if (k.kind !== "lava") continue;
+      const sx = k.x * WORLD_W, sy = k.y * WORLD_H;
+      if (x > sx && x < sx + k.w * WORLD_W && y > sy && y < sy + k.h * WORLD_H) return true;
+    }
+    return false;
+  }
+
   // ---- combat ----
 
   private aimDir(p: PlayerState, inp: MatchInput): [number, number] {
@@ -427,7 +482,7 @@ export class Match {
         while (da > Math.PI) da -= Math.PI * 2;
         while (da < -Math.PI) da += Math.PI * 2;
         if (Math.abs(da) > def.melee.arc / 2 + 0.25) continue;
-        this.damage(q, def.damage, p.id, dx * def.knockback, -260);
+        this.damage(q, def.damage, p.id, dx * def.knockback, -260, p.weapon);
       }
       // Punch-boost: airborne fists swing kicks the attacker (mobility).
       if (p.weapon === "fists" && !p.onGround) {
@@ -435,6 +490,16 @@ export class Match {
         p.vy += dy * 180;
       }
       this.events.push({ kind: "swing", a: p.id });
+      return;
+    }
+    if (def.beam) {
+      // Sniper + laser are hitscan (no projectiles) — matches LocalMode.
+      if (p.ammo <= 0) {
+        p.cooldown = 0.25;
+        this.events.push({ kind: "dry", a: p.id });
+        return;
+      }
+      this.fireBeam(p, dx, dy);
       return;
     }
     if (p.ammo <= 0) {
@@ -456,11 +521,61 @@ export class Match {
         gravity: def.gravity,
         explosiveDmg: def.explosive?.damage,
         explosiveRadius: def.explosive?.radius,
+        fuse: p.weapon === "grenade" ? 1.6 : undefined,
       });
     }
     p.vx -= dx * def.recoil;
     p.vy -= dy * def.recoil * 0.5;
     p.cooldown = def.interval;
+  }
+
+  private rayWallDist(sx: number, sy: number, dx: number, dy: number, maxD: number): number {
+    let best = maxD;
+    for (const s of this.solids()) {
+      // Slab test for ray vs AABB.
+      let tmin = 0, tmax = best, ok = true;
+      if (Math.abs(dx) < 1e-9) { if (sx < s.x || sx > s.x + s.w) ok = false; }
+      else { let t1 = (s.x - sx) / dx, t2 = (s.x + s.w - sx) / dx; if (t1 > t2) [t1, t2] = [t2, t1]; tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); if (tmin > tmax) ok = false; }
+      if (!ok) continue;
+      if (Math.abs(dy) < 1e-9) { if (sy < s.y || sy > s.y + s.h) continue; }
+      else { let t1 = (s.y - sy) / dy, t2 = (s.y + s.h - sy) / dy; if (t1 > t2) [t1, t2] = [t2, t1]; tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); if (tmin > tmax) continue; }
+      if (tmin > 0 && tmin < best) best = tmin;
+    }
+    return best;
+  }
+
+  private fireBeam(p: PlayerState, dx: number, dy: number): void {
+    const def = WEAPONS[p.weapon];
+    const sx = p.x, sy = p.y + PH / 2 - 6;
+    const maxD = 2200;
+    // Laser burns through walls (original behavior); sniper is stopped by cover.
+    const laser = p.weapon === "laser";
+    const wallD = laser ? maxD : this.rayWallDist(sx, sy, dx, dy, maxD);
+    const hits: { q: PlayerState; t: number }[] = [];
+    for (const q of this.players) {
+      if (q.id === p.id || !q.alive) continue;
+      const rx = q.x - sx, ry = q.y + PH / 2 - sy;
+      const t = rx * dx + ry * dy;
+      if (t < 0 || t > wallD) continue;
+      if (Math.abs(rx * dy - ry * dx) >= 22) continue;
+      hits.push({ q, t });
+    }
+    hits.sort((a, b) => a.t - b.t);
+    const targets = laser ? hits : hits.slice(0, 1);
+    for (const h of targets) this.damage(h.q, def.damage, p.id, dx * def.knockback, -220, p.weapon);
+    const endD = laser ? wallD : (targets.length ? targets[0].t : wallD);
+    // Short tracer so remote clients see the beam (zero damage: skipped by hit code).
+    this.projectiles.push({
+      id: this.nextProjId++, kind: p.weapon,
+      x: sx + dx * endD, y: sy + dy * endD, vx: 0, vy: 0,
+      life: 0.15, owner: p.id, bounces: 0, damage: 0,
+    });
+    p.ammo--;
+    // Recoil-fly: firing down lifts the shooter (minigun jetpack included).
+    p.vx -= dx * def.recoil;
+    p.vy -= dy * def.recoil * 0.5;
+    p.cooldown = def.interval;
+    this.events.push({ kind: "beam", a: p.id, text: p.weapon });
   }
 
   private tryThrow(p: PlayerState, inp: MatchInput): void {
@@ -472,7 +587,7 @@ export class Match {
       x: p.x + dx * 24, y: p.y + PH / 2 - 6,
       vx: dx * sp + p.vx * 0.4, vy: dy * sp - 120,
       life: 1.4, owner: p.id, bounces: 0,
-      damage: THROW_DAMAGE, thrown: true,
+      damage: THROW_DAMAGE, thrown: true, ammo: p.ammo,
     });
     this.events.push({ kind: "throw", a: p.id, text: p.weapon });
     p.weapon = "fists";
@@ -494,7 +609,7 @@ export class Match {
     }
   }
 
-  private damage(q: PlayerState, dmg: number, fromId: number, kx: number, ky: number): void {
+  private damage(q: PlayerState, dmg: number, fromId: number, kx: number, ky: number, cause = "fists"): void {
     if (!q.alive) return;
     let final = dmg;
     if (this.blocking.get(q.id)) {
@@ -512,9 +627,9 @@ export class Match {
       const killer = this.players.find((p) => p.id === fromId);
       if (killer && killer.id !== q.id) {
         killer.kills++;
-        this.events.push({ kind: "kill", text: `${killer.name} ▸ ${q.name}`, a: killer.id, b: q.id });
+        this.events.push({ kind: "kill", text: `${killer.name} ▸ ${q.name} [${cause}]`, a: killer.id, b: q.id });
       } else {
-        this.events.push({ kind: "death", text: q.name, a: q.id, b: q.id });
+        this.events.push({ kind: "death", text: `${q.name} died [${cause}]`, a: q.id, b: q.id });
       }
     }
   }
@@ -527,7 +642,7 @@ export class Match {
       if (d > radius + 20) continue;
       const fall = 1 - (d / (radius + 20)) * 0.5;
       const a = Math.atan2(q.y + PH / 2 - y, q.x - x);
-      this.damage(q, dmg * fall, owner, Math.cos(a) * 620, Math.sin(a) * 620 - 200);
+      this.damage(q, dmg * fall, owner, Math.cos(a) * 620, Math.sin(a) * 620 - 200, "explosion");
     }
   }
 
@@ -537,6 +652,14 @@ export class Match {
     for (const pr of this.projectiles) {
       pr.life -= dt;
       if (pr.gravity) pr.vy += pr.gravity * dt;
+      // Grenade fuse: blows up mid-air like LocalMode (no protocol change).
+      if (pr.fuse !== undefined && pr.fuse > 0) {
+        pr.fuse -= dt;
+        if (pr.fuse <= 0) {
+          if (pr.explosiveDmg && pr.explosiveRadius) this.explode(pr.x, pr.y, pr.explosiveRadius, pr.explosiveDmg, pr.owner);
+          continue;
+        }
+      }
       pr.x += pr.vx * dt;
       pr.y += pr.vy * dt;
       let dead = pr.life <= 0;
@@ -579,17 +702,26 @@ export class Match {
           else pr.vy *= -1;
           pr.x += pr.vx * dt * 2;
           pr.y += pr.vy * dt * 2;
+        } else if (pr.thrown) {
+          // Thrown guns land as pickups again (matches LocalMode).
+          this.drops.push({ x: pr.x, y: pr.y, vx: 0, vy: -60, weapon: pr.kind, ammo: pr.ammo ?? WEAPONS[pr.kind].mag });
+          dead = true;
         } else {
           dead = true;
         }
       }
-      // player hits (never the owner)
-      if (!dead) {
+      // player hits (never the owner; tracers carry 0 damage and skip)
+      if (!dead && pr.damage > 0) {
         for (const q of this.players) {
           if (!q.alive || q.id === pr.owner) continue;
           if (Math.abs(pr.x - q.x) < PW / 2 + 6 && pr.y > q.y - 6 && pr.y < q.y + PH + 6) {
             const a = Math.atan2(pr.vy, pr.vx);
-            this.damage(q, pr.damage, pr.owner, Math.cos(a) * 380, Math.sin(a) * 200 - 120);
+            this.damage(q, pr.damage, pr.owner, Math.cos(a) * 380, Math.sin(a) * 200 - 120, pr.thrown ? "thrown" : String(pr.kind));
+            if (pr.thrown) this.drops.push({ x: pr.x, y: pr.y - 10, vx: pr.vx * 0.2, vy: -150, weapon: pr.kind, ammo: pr.ammo ?? WEAPONS[pr.kind].mag });
+            else if (String(pr.kind) === "flamethrower") {
+              this.burns.set(q.id, 1.2);
+              this.burnOwners.set(q.id, pr.owner);
+            }
             dead = true;
             break;
           }
@@ -631,8 +763,11 @@ export class Match {
 
   private stepDrops(dt: number): void {
     const solids = this.solids();
+    const keep: DroppedGun[] = [];
     for (const d of this.drops) {
       d.vy = Math.min(MAX_FALL, d.vy + GRAVITY * 0.7 * dt);
+      // Parachute sway while falling (original-style drop-in).
+      if (d.vy !== 0) d.x += Math.sin(this.time * 3 + d.y * 0.02) * 40 * dt;
       d.x += d.vx * dt;
       d.vx *= 1 - Math.min(1, 2 * dt);
       d.y += d.vy * dt;
@@ -640,12 +775,20 @@ export class Match {
         if (d.x > s.x - 8 && d.x < s.x + s.w + 8 && d.y > s.y - 6 && d.y < s.y + s.h) {
           if (d.vy > 0) {
             d.y = s.y - 4;
-            d.vy = -d.vy * 0.3;
-            if (Math.abs(d.vy) < 40) d.vy = 0;
+            d.vy = -d.vy * 0.35; // small bounce on landing
+            if (Math.abs(d.vy) < 60) d.vy = 0;
+            d.vx *= 0.6;
           }
         }
       }
+      // Lava/void swallows the drop: a fresh one falls from the sky after 3s.
+      if (d.y > WORLD_H + 40 || this.inLava(d.x, d.y)) {
+        this.dropRespawns.push(3);
+        continue;
+      }
+      keep.push(d);
     }
+    this.drops = keep;
   }
 
   private checkHazards(p: PlayerState): void {
@@ -653,7 +796,7 @@ export class Match {
     // void / out of bounds
     if (p.y > WORLD_H + 80 || p.x < -200 || p.x > WORLD_W + 200) {
       p.hp = 0; p.alive = false;
-      this.events.push({ kind: "death", text: `${p.name} fell`, a: p.id, b: p.id });
+      this.events.push({ kind: "death", text: `${p.name} died [fell]`, a: p.id, b: p.id });
       return;
     }
     const body = { x: p.x - PW / 2, y: p.y, w: PW, h: PH };
@@ -663,7 +806,7 @@ export class Match {
       const s = { x: pl.x * WORLD_W, y: pl.y * WORLD_H, w: pl.w * WORLD_W, h: pl.h * WORLD_H };
       if (body.x < s.x + s.w && body.x + body.w > s.x && body.y < s.y + s.h && body.y + body.h > s.y) {
         p.hp = 0; p.alive = false;
-        this.events.push({ kind: "death", text: `${p.name} melted`, a: p.id, b: p.id });
+        this.events.push({ kind: "death", text: `${p.name} died [lava]`, a: p.id, b: p.id });
         return;
       }
     }
@@ -677,7 +820,7 @@ export class Match {
       const s = { x: k.x * WORLD_W, y: k.y * WORLD_H, w: k.w * WORLD_W, h: k.h * WORLD_H };
       if (body.x < s.x + s.w && body.x + body.w > s.x && body.y < s.y + s.h && body.y + body.h > s.y) {
         p.hp = 0; p.alive = false;
-        this.events.push({ kind: "death", text: `${p.name} hit ${k.kind}`, a: p.id, b: p.id });
+        this.events.push({ kind: "death", text: `${p.name} died [${k.kind}]`, a: p.id, b: p.id });
         return;
       }
     }
@@ -688,9 +831,17 @@ export class Match {
       this.resetTimer -= dt;
       if (this.resetTimer < 0) {
         this.round++;
-        this.cycleIndex = (this.cycleIndex + 1) % this.cycle.length;
+        // Random (non-sequential) next arena, like the original.
+        if (this.cycle.length > 1) {
+          let n = this.cycleIndex;
+          do { n = (Math.random() * this.cycle.length) | 0; } while (n === this.cycleIndex);
+          this.cycleIndex = n;
+        }
         this.level = this.cycle[this.cycleIndex];
-        this.resetArena();
+        // A finished match (first to 5) resets wins here so the matchEnd
+        // broadcast still carries the final tally.
+        if (Object.values(this.wins).some((w) => w >= WIN_SCORE)) this.wins = {};
+        this.resetArena(); // clears projectiles, fresh spawns
         this.events.push({ kind: "round", text: this.level.name, a: this.round });
       }
       return;
@@ -702,15 +853,14 @@ export class Match {
       if (winner) {
         this.wins[winner.id] = (this.wins[winner.id] ?? 0) + 1;
         winner.wins = this.wins[winner.id];
-        this.events.push({ kind: "roundEnd", text: winner.name, a: winner.id, b: this.round });
+        this.events.push({ kind: "roundEnd", text: `${winner.name} (${this.wins[winner.id]}/${WIN_SCORE})`, a: winner.id, b: this.round });
         if (this.wins[winner.id] >= WIN_SCORE) {
           this.events.push({ kind: "matchEnd", text: winner.name, a: winner.id });
-          this.wins = {};
         }
       } else {
         this.events.push({ kind: "roundEnd", text: "draw", a: -1, b: this.round });
       }
-      this.resetTimer = 2;
+      this.resetTimer = 1.5;
     }
   }
 

@@ -73,7 +73,7 @@ export class LocalMode {
   private matchOver = false; private frozen = false; private paused = false;
   private showHelp = false;
   private rematchBtn: HTMLButtonElement | null = null;
-  private shake = 0; private dropT = 2; private off: (() => void)[] = [];
+  private shake = 0; private dropT = 2; private dropRespawn: number[] = []; private off: (() => void)[] = [];
   private deco: { x: number; y: number; s: number }[] = [];
 
   constructor(private canvas: HTMLCanvasElement, private opts: { humans: number; bots: number }) {
@@ -173,14 +173,39 @@ export class LocalMode {
       }
       p.vx = 0; p.vy = 0; p.hp = PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = '';
     });
-    this.projs = []; this.fuses = []; this.drops = []; this.beams = [];
+    this.projs = []; this.fuses = []; this.drops = []; this.beams = []; this.dropRespawn = [];
     this.crates = (lv.crates ?? []).map((c) => ({ x: c.x * W, y: c.y * H, w: c.w * W, h: c.h * H, vy: 0 })); this.barrels = (lv.barrels ?? []).map((b) => ({ x: b.x * W, y: b.y * H, hp: 30 }));
-    lv.weaponDrops.slice(0, 2).forEach((d) => this.spawnDrop(d[0] * W, d[1] * H));
+    lv.weaponDrops.slice(0, 2).forEach((d) => this.spawnDrop(d[0] * W));
   }
 
-  private spawnDrop(x: number, y: number): void {
+  private spawnDrop(x: number): void {
+    // Drops fall from the sky (original Stick Fight style), not at floor spots.
     const w = GUN_POOL[(Math.random() * GUN_POOL.length) | 0];
-    this.drops.push({ x, y, vx: 0, vy: 0, weapon: w, ammo: fullAmmo(w) });
+    this.drops.push({ x, y: H * 0.02, vx: (Math.random() - 0.5) * 120, vy: 0, weapon: w, ammo: fullAmmo(w) });
+  }
+
+  /** Coyote jump off landed gun drops / crate tops (stand-on-gun jumps). */
+  private onProp(p: R): boolean {
+    for (const g of this.drops) {
+      if (g.vy === 0 && Math.abs(g.x - p.x) < 26 && Math.abs(g.y - p.y) <= 8) return true;
+    }
+    for (const c of this.crates) {
+      if (p.x + 11 > c.x && p.x - 11 < c.x + c.w && Math.abs(p.y - c.y) <= 8) return true;
+    }
+    return false;
+  }
+
+  private inLava(x: number, y: number): boolean {
+    const lv = this.level();
+    for (const k of lv.killRects ?? []) {
+      if (k.kind !== 'lava') continue;
+      if (x > k.x * W && x < (k.x + k.w) * W && y > k.y * H && y < (k.y + k.h) * H) return true;
+    }
+    for (const s of this.solids()) {
+      if (s.type !== 'lava') continue;
+      if (x > s.x && x < s.x + s.w && y > s.y && y < s.y + s.h) return true;
+    }
+    return false;
   }
 
   private rotatorBox(cx: number, cy: number, w: number, h: number, angleSpeed: number): Solid {
@@ -227,11 +252,11 @@ export class LocalMode {
     if (v.weapon !== 'fists') this.drops.push({ x: v.x, y: v.y - 40, vx: (Math.random() - 0.5) * 200, vy: -200, weapon: v.weapon, ammo: v.ammo });
     this.burst(v.x, v.y - 34, 22, v.color); this.shake = Math.max(this.shake, 0.35);
     const killer = this.players[owner];
-    this.feed.push(killer && owner !== v.id ? `${killer.name} ▸ ${v.name} [${cause}]` : `${v.name} died`);
+    this.feed.push(killer && owner !== v.id ? `${killer.name} ▸ ${v.name} [${cause}]` : `${v.name} died [${cause}]`);
     if (this.feed.length > 8) this.feed.shift();
     const alive = this.players.filter((p) => p.alive);
     if (alive.length > 1 || this.roundLock > 0) return;
-    this.roundLock = 2.5;
+    this.roundLock = 1.5;
     if (alive.length === 1) { const w = alive[0]; w.wins++; this.matchOver = w.wins >= WIN_SCORE_DEFAULT; this.banner = this.matchOver ? `${w.name} WINS THE MATCH!  [R] REMATCH · [Q] MENU` : `${w.name} SCORES  (${w.wins}/${WIN_SCORE_DEFAULT})`; this.sfx.win(); }
     else { this.banner = 'DRAW!'; this.sfx.win(); }
     this.bannerT = this.matchOver ? 1e9 : this.roundLock;
@@ -242,7 +267,7 @@ export class LocalMode {
     this.sfx.boom();
     for (const p of this.players) {
       const dx = p.x - x, dy = (p.y - 34) - y, d = Math.hypot(dx, dy);
-      if (p.alive && d < r) { const f = 1 - (d / r) * 0.6; this.hurt(p, dmg * f, (dx / (d || 1)) * 650 * f, -380 * f, owner, 'boom'); }
+      if (p.alive && d < r) { const f = 1 - (d / r) * 0.6; this.hurt(p, dmg * f, (dx / (d || 1)) * 650 * f, -380 * f, owner, 'explosion'); }
     }
     for (const b of this.barrels) if (b.hp > 0 && Math.hypot(b.x - x, b.y - y) < r) { b.hp = 0; this.fuses.push({ x: b.x, y: b.y, t: 0.12, r: 150, dmg: 55, owner }); }
   }
@@ -298,7 +323,9 @@ export class LocalMode {
     const sx = p.x, sy = p.y - 46;
     const dx = Math.cos(aim), dy = Math.sin(aim);
     const maxD = 2200;
-    const wallD = this.rayWallDist(sx, sy, dx, dy, maxD);
+    // Laser burns through walls (original behavior); sniper is stopped by cover.
+    const wallD = p.weapon === 'laser' ? maxD : this.rayWallDist(sx, sy, dx, dy, maxD);
+    const laserHits: R[] = [];
     let best: R | null = null, bestD = wallD;
     for (const e of this.players) {
       if (e === p || !e.alive) continue;
@@ -306,13 +333,16 @@ export class LocalMode {
       const t = rx * dx + ry * dy;
       if (t < 0 || t > bestD) continue;
       const perp = Math.abs(rx * dy - ry * dx);
-      if (perp < 20 && t < bestD) { best = e; bestD = t; }
+      if (perp >= 20) continue;
+      if (p.weapon === 'laser') laserHits.push(e);
+      else if (t < bestD) { best = e; bestD = t; }
     }
-    const ex = sx + dx * bestD, ey = sy + dy * bestD;
+    const ex = sx + dx * wallD, ey = sy + dy * wallD;
     const color = p.weapon === 'laser' ? '#22d3ee' : '#fef08a';
     this.beams.push({ x1: sx, y1: sy, x2: ex, y2: ey, t: 0.18, color });
     this.burst(ex, ey, 8, color, 260);
     if (best) this.hurt(best, w.damage, dx * w.knockback, -220, p.id, p.weapon);
+    else for (const e of laserHits) this.hurt(e, w.damage, dx * w.knockback, -220, p.id, p.weapon);
     if (!isInfinite(p.weapon) && p.ammo > 0) p.ammo--;
     if (!isInfinite(p.weapon) && p.ammo === 0) { p.weapon = 'fists'; p.ammo = -1; }
     p.cd = w.fireInterval;
@@ -427,18 +457,46 @@ export class LocalMode {
       this.roundLock -= dt;
       if (this.roundLock > 0) return;
       if (this.matchOver) { this.frozen = true; return; }
-      this.round++; this.levelIdx = (this.levelIdx + 1) % LEVELS.length; this.spawnAll();
-      this.banner = `${this.level().name} — ROUND ${this.round}`; this.bannerT = 2;
+      this.round++;
+      // Random (non-sequential) next arena, like the original.
+      if (LEVELS.length > 1) {
+        let n = this.levelIdx;
+        do { n = (Math.random() * LEVELS.length) | 0; } while (n === this.levelIdx);
+        this.levelIdx = n;
+      }
+      this.spawnAll(); // clears projectiles, fresh spawns
+      this.banner = `${this.level().name} — ROUND ${this.round}`; this.bannerT = 1.5;
       return;
     }
     const solids = this.solids();
     for (const c of this.crates) { c.vy = Math.min(1400, c.vy + GRAVITY * dt); c.y += c.vy * dt; for (const s of solids) { if (s.type !== 'crate' && c.x < s.x + s.w && c.x + c.w > s.x && c.y < s.y + s.h && c.y + c.h > s.y && c.vy > 0 && c.y + c.h - s.y < 30) { c.y = s.y - c.h; c.vy = 0; } } }
     this.dropT -= dt;
-    if (this.dropT <= 0) { this.dropT = 3.5; const lv = this.level(); if (this.drops.length < 4) { const d = lv.weaponDrops[(Math.random() * lv.weaponDrops.length) | 0]; this.spawnDrop(d[0] * W, d[1] * H - 20); } }
+    if (this.dropT <= 0) { this.dropT = 3.5; const lv = this.level(); if (this.drops.length < 4) { const d = lv.weaponDrops[(Math.random() * lv.weaponDrops.length) | 0]; this.spawnDrop(d[0] * W); } }
     for (const g of this.drops) {
-      g.vy = Math.min(1400, g.vy + GRAVITY * dt); g.x += g.vx * dt; g.y += g.vy * dt; g.vx *= 0.99;
-      for (const s of solids) if (g.x > s.x - 8 && g.x < s.x + s.w + 8 && g.y > s.y - 6 && g.y < s.y + s.h && g.vy > 0) { g.y = s.y - 2; g.vy = 0; }
-      if (g.y > H + 40) { g.y = -20; g.vy = 0; }
+      g.vy = Math.min(1400, g.vy + GRAVITY * dt);
+      // Parachute sway while falling (original-style drop-in).
+      if (g.vy !== 0) g.x += Math.sin(this.time * 3 + g.y * 0.02) * 40 * dt;
+      g.x += g.vx * dt; g.y += g.vy * dt; g.vx *= 0.99;
+      for (const s of solids) {
+        if (g.x > s.x - 8 && g.x < s.x + s.w + 8 && g.y > s.y - 6 && g.y < s.y + s.h && g.vy > 0) {
+          g.y = s.y - 2;
+          g.vy = -g.vy * 0.35; // small bounce on landing
+          if (Math.abs(g.vy) < 70) g.vy = 0;
+          g.vx *= 0.6;
+        }
+      }
+      // Lava/void swallows the drop: a fresh one falls from the sky after 3s.
+      if (g.y > H + 40 || this.inLava(g.x, g.y)) { g.y = H + 999; g.vy = 0; this.dropRespawn.push(3); }
+    }
+    // Delayed respawns for drops lost to lava/void.
+    for (let i = this.dropRespawn.length - 1; i >= 0; i--) {
+      this.dropRespawn[i] -= dt;
+      if (this.dropRespawn[i] <= 0) {
+        this.dropRespawn.splice(i, 1);
+        const lv = this.level();
+        const d = lv.weaponDrops[(Math.random() * lv.weaponDrops.length) | 0];
+        this.spawnDrop(d[0] * W);
+      }
     }
     for (const p of this.players) {
       if (!p.alive) continue;
@@ -476,7 +534,7 @@ export class LocalMode {
       if (p.ground === 'conveyor') { const s = solids.find((q) => q.type === 'conveyor'); if (s?.belt) p.vx += s.belt * W * dt; }
       const wasGround = p.onGround;
       const fallSpeed = p.vy;
-      if (J && p.onGround) { p.vy = -JUMP_SPEED; p.onGround = false; this.sfx.jump(); }
+      if (J && (p.onGround || this.onProp(p))) { p.vy = -JUMP_SPEED; p.onGround = false; this.sfx.jump(); }
       if (D) p.dropT = 0.25; else p.dropT = Math.max(0, p.dropT - dt);
       p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
       p.x += p.vx * dt;

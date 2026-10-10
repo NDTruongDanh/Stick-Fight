@@ -1,6 +1,7 @@
 import { WebSocket, WebSocketServer } from "ws";
-import { Match, emptyInput, getBuiltinCycle, getBuiltinLevel } from "./Match.js";
+import { Match, emptyInput } from "./Match.js";
 import type { MatchInput } from "./Match.js";
+import { LEVELS } from "../src/levels/levels.js";
 import { MAX_PLAYERS, PROTOCOL_VERSION, SNAP_RATE, TICK_RATE } from "../shared/constants.js";
 import type { ClientMsg, ServerMsg } from "../shared/protocol.js";
 import type { LevelDef } from "../shared/types.js";
@@ -19,44 +20,8 @@ const send = (ws: WebSocket, msg: ServerMsg): void => {
 };
 
 async function resolveLevel(id: string): Promise<LevelDef | null> {
-  try {
-    // Indirection keeps tsc happy when the client level pack is absent.
-    const path = "../src/levels/index.js";
-    const mod = (await import(path)) as Record<string, unknown>;
-    const pick = (lv: unknown): LevelDef | null => {
-      if (lv && typeof lv === "object" && "id" in (lv as object) && "platforms" in (lv as object)) {
-        return lv as LevelDef;
-      }
-      return null;
-    };
-    if (typeof mod["getLevel"] === "function") {
-      const lv = pick((mod["getLevel"] as (x: string) => unknown)(id));
-      if (lv) return lv;
-    }
-    const levels = mod["LEVELS"] as unknown;
-    if (Array.isArray(levels)) {
-      const lv = levels.map(pick).find(Boolean);
-      void lv;
-      for (const l of levels) {
-        const p = pick(l);
-        if (p && p.id === id) return p;
-      }
-    } else if (levels && typeof levels === "object") {
-      for (const l of Object.values(levels as Record<string, unknown>)) {
-        const p = pick(l);
-        if (p) {
-          if (p.id === id) return p;
-        }
-      }
-    }
-    if (mod["default"]) {
-      const p = pick(mod["default"]);
-      if (p && (p.id === id || true)) return id === p.id ? p : null;
-    }
-  } catch {
-    // fall through to builtin
-  }
-  return null;
+  // Canonical pack is statically bundled; no dynamic import needed.
+  return LEVELS.find((l) => l.id === id) ?? null;
 }
 
 export class HostServer {
@@ -73,7 +38,8 @@ export class HostServer {
     private port: number,
     private levelId: string,
   ) {
-    this.match = new Match(getBuiltinLevel(levelId), { cycle: getBuiltinCycle() });
+    const level = LEVELS.find((l) => l.id === levelId) ?? LEVELS[0];
+    this.match = new Match(level, { cycle: [...LEVELS] });
   }
 
   start(): void {

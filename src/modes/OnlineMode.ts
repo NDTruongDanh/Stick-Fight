@@ -12,6 +12,7 @@ import {
   WORLD_W,
 } from "../../shared/constants.js";
 import type { LevelDef, PlayerState } from "../../shared/types.js";
+import { LEVELS } from "../levels/levels.js";
 
 const PW = 26;
 const PH = 54;
@@ -32,8 +33,11 @@ const FALLBACK_LEVEL: LevelDef = {
 };
 
 async function resolveLevel(id: string): Promise<LevelDef> {
+  // Canonical pack first (statically bundled: 9 arenas).
+  const canonical = LEVELS.find((l) => l.id === id);
+  if (canonical) return canonical;
   try {
-    const path = "../levels/index.js"; // src/levels/index.ts if the level pack exists
+    const path = "../levels/index.js"; // legacy level pack if present
     const mod = (await import(/* @vite-ignore */ path)) as Record<string, unknown>;
     const pick = (lv: unknown): LevelDef | null =>
       lv && typeof lv === "object" && "platforms" in (lv as object) && "spawns" in (lv as object)
@@ -58,9 +62,9 @@ async function resolveLevel(id: string): Promise<LevelDef> {
       if (p) return p;
     }
   } catch {
-    /* use fallback */
+    /* use canonical fallback */
   }
-  return FALLBACK_LEVEL;
+  return LEVELS[0] ?? FALLBACK_LEVEL;
 }
 
 interface KeyState {
@@ -241,6 +245,14 @@ export class OnlineMode {
   // ---- snapshots / prediction ----
 
   private onSnapshot(s: SnapshotMsg): void {
+    // Surface server killfeed / round flow (causes ride in [brackets]).
+    for (const e of s.events ?? []) {
+      if (!e.text) continue;
+      if (e.kind === "kill" || e.kind === "death") this.pushFeed(e.text);
+      else if (e.kind === "roundEnd") this.pushFeed(`🏆 ${e.text} takes the round`);
+      else if (e.kind === "matchEnd") this.pushFeed(`🏆 ${e.text} WINS THE MATCH`);
+      else if (e.kind === "round") this.pushFeed(`— ${e.text} —`);
+    }
     if (s.levelId && s.levelId !== this.level.id) {
       void resolveLevel(s.levelId).then((lv) => {
         this.level = lv;

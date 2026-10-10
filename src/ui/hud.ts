@@ -25,8 +25,8 @@ const WEAPON_ICON: Record<string, string> = {
   fists: '👊', pistol: '🔫', revolver: '🔫', deagle: '🔫', uzi: '🔫',
   ak47: '🔫', m16: '🔫', sniper: '🎯', shotgun: '💥', sawedoff: '💥',
   bouncer: '🔮', minigun: '🔫', grenade: '💣', rpg: '🚀', flamethrower: '🔥',
-  sword: '🗡️', spear: '🔱', laser: '🔆', thrown: '🌀', boom: '💥',
-  lava: '🌋', fell: '🕳', spikes: '🦔',
+  sword: '🗡️', spear: '🔱', laser: '🔆', thrown: '🌀', boom: '💥', explosion: '💥',
+  burn: '🔥', lava: '🌋', fell: '🕳', spikes: '🦔',
 };
 
 function iconFor(cause: string): string {
@@ -34,10 +34,16 @@ function iconFor(cause: string): string {
   return WEAPON_ICON[k] ?? '⚔️';
 }
 
-/** Killfeed entries are "KILLER ▸ VICTIM [cause]"; render cause as icon + tag. */
+/** Killfeed entries are "KILLER ▸ VICTIM [cause]" or "VICTIM died [cause]"; render cause as icon + tag. */
 function feedHTML(f: string): string {
   const m = f.match(/^(.*)▸(.*)\[(.*)\]\s*$/);
-  if (!m) return esc(f);
+  if (!m) {
+    const d = f.match(/^(.*) died \[(.*)\]\s*$/);
+    if (!d) return esc(f);
+    const victim = esc(d[1].trim());
+    const cause = d[2].trim();
+    return `<span class="text-neutral-300 font-bold">${victim}</span> <span class="text-neutral-400">${iconFor(cause)} died</span> <span class="ml-1 px-1 rounded bg-neutral-700 text-xs text-neutral-200">${esc(cause)}</span>`;
+  }
   const killer = esc(m[1].trim());
   const victim = esc(m[2].trim());
   const cause = m[3].trim();
