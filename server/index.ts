@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import { HostServer } from "./HostServer.js";
-import { DEFAULT_PORT } from "../shared/constants.js";
+import { DEFAULT_PORT, TICK_RATE } from "../shared/constants.js";
 import type { LevelDef } from "../shared/types.js";
 
 function arg(name: string, fallback: string): string {
@@ -31,6 +31,7 @@ const levelId = arg("level", "woods1");
 const winsTarget = Number(arg("wins", "5")) || 5;
 const botCount = Math.max(0, Number(arg("bots", "0")) || 0);
 const levelFile = arg("level-file", "");
+const tickHz = Math.max(10, Math.min(120, Math.floor(Number(arg("tick", String(TICK_RATE)))) || TICK_RATE));
 
 // Custom editor map: loose validation (object with spawns + weaponDrops).
 // Full validation happens client-side via editor validateLevel.
@@ -53,7 +54,7 @@ if (levelFile) {
   }
 }
 
-const server = new HostServer(port, levelId, winsTarget, botCount, customLevel);
+const server = new HostServer(port, levelId, winsTarget, botCount, customLevel, tickHz);
 server.start();
 
 console.log("=== Stick Fight LAN host ===");

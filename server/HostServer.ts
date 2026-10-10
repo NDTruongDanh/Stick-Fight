@@ -26,12 +26,23 @@ async function resolveLevel(id: string): Promise<LevelDef | null> {
   return LEVELS.find((l) => l.id === id) ?? null;
 }
 
+/** Fixed-step host loop tuning (see pumpSim). */
+const TICK_WAKE_MS = 10;
+const MAX_CATCHUP = 5;
+const STALL_CLAMP_MS = 250;
+const HEALTH_LOG_MS = 30_000;
+
 export class HostServer {
   private wss: WebSocketServer | null = null;
   private match: Match;
   private clients = new Map<number, ClientInfo>();
   private nextId = 1;
   private timers: ReturnType<typeof setInterval>[] = [];
+  private tickAcc = 0;
+  private lastTickWall = 0;
+  private tickDrops = 0;
+  private healthSteps = 0;
+  private healthSince = 0;
   private started = false;
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private seed = (Math.random() * 2 ** 31) | 0;
@@ -45,7 +56,9 @@ export class HostServer {
     private winsTarget = 5,
     private botCount = 0,
     customLevel?: LevelDef | null,
+    private tickHz = TICK_RATE,
   ) {
+    this.tickHz = Math.max(10, Math.min(120, Math.floor(this.tickHz) || TICK_RATE));
     if (customLevel) {
       this.customJson = JSON.stringify(customLevel);
       this.match = new Match(customLevel, {
@@ -75,20 +88,64 @@ export class HostServer {
     this.wss.on("connection", (ws) => this.onConnect(ws));
     this.wss.on("error", (err) => console.error("[host] ws error:", err));
 
-    const dt = 1 / TICK_RATE;
+    const dt = 1 / this.tickHz;
+    this.tickAcc = 0;
+    this.lastTickWall = Date.now();
+    this.healthSince = Date.now();
+    this.healthSteps = 0;
+    this.tickDrops = 0;
     this.timers.push(
       setInterval(() => {
-        const inputs = new Map<number, MatchInput>();
-        for (const c of this.clients.values()) inputs.set(c.id, c.input);
-        this.match.step(dt, inputs);
-      }, 1000 / TICK_RATE),
+        this.pumpSim(dt);
+      }, TICK_WAKE_MS),
     );
     this.timers.push(
       setInterval(() => {
         this.broadcastSnapshot();
       }, 1000 / SNAP_RATE),
     );
-    console.log(`[host] listening on port ${this.port}`);
+    console.log(`[host] listening on port ${this.port} (tick ${this.tickHz}Hz, snap ${SNAP_RATE}Hz)`);
+  }
+
+  /**
+   * Fixed-step accumulator: each 10ms wake converts real elapsed wall-clock
+   * time into fixed-dt Match steps, so a starved event loop (server + clients
+   * sharing one Windows loop) catches up instead of running the sim slow.
+   * At most MAX_CATCHUP steps run per wake; surplus backlog is dropped and
+   * counted (slow-motion under extreme load, never a death spiral). The tick
+   * counter increments per executed step, so snapshot tick semantics are
+   * unchanged. Snapshot broadcast stays on its own 20Hz wall-clock timer.
+   */
+  private pumpSim(dt: number): void {
+    const now = Date.now();
+    let elapsed = now - this.lastTickWall;
+    this.lastTickWall = now;
+    if (!(elapsed >= 0)) elapsed = 0;
+    if (elapsed > STALL_CLAMP_MS) elapsed = STALL_CLAMP_MS;
+    this.tickAcc += elapsed / 1000;
+    let steps = 0;
+    while (this.tickAcc >= dt && steps < MAX_CATCHUP) {
+      const inputs = new Map<number, MatchInput>();
+      for (const c of this.clients.values()) inputs.set(c.id, c.input);
+      this.match.step(dt, inputs);
+      this.tickAcc -= dt;
+      steps++;
+    }
+    this.healthSteps += steps;
+    if (this.tickAcc >= dt) {
+      const dropped = Math.floor(this.tickAcc / dt);
+      this.tickDrops += dropped;
+      this.tickAcc -= dropped * dt;
+    }
+    if (now - this.healthSince >= HEALTH_LOG_MS) {
+      const secs = (now - this.healthSince) / 1000;
+      console.log(
+        `[host] tick health: ${(this.healthSteps / secs).toFixed(1)} steps/s, ${this.tickDrops} drops (tick ${this.match.tick})`,
+      );
+      this.healthSteps = 0;
+      this.tickDrops = 0;
+      this.healthSince = now;
+    }
   }
 
   stop(): void {
