@@ -282,8 +282,14 @@ async function startOnline(url: string, name: string): Promise<void> {
 quitBtn.onclick = () => showMenu();
 
 // Global H toggles the How-to-play overlay from menus (in-game H is handled by LocalMode).
+// Skip when typing in an input/textarea so player names containing 'h' work.
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'KeyH' || mode) return;
+  const el = e.target as HTMLElement | null;
+  if (el) {
+    const tag = el.tagName?.toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable) return;
+  }
   try {
     ui.showHow({ onBack: showMenu });
   } catch {

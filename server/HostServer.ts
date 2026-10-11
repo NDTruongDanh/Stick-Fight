@@ -49,6 +49,8 @@ export class HostServer {
   private customJson: string | null = null;
   /** Sequence for unique runtime bot names (BOT-<n>). */
   private nextBotSeq = 1;
+  /** Tick of the last broadcast snapshot (snapshots ride the sim clock). */
+  private lastSnapTick = 0;
 
   constructor(
     private port: number,
@@ -94,15 +96,11 @@ export class HostServer {
     this.healthSince = Date.now();
     this.healthSteps = 0;
     this.tickDrops = 0;
+    this.lastSnapTick = 0;
     this.timers.push(
       setInterval(() => {
         this.pumpSim(dt);
       }, TICK_WAKE_MS),
-    );
-    this.timers.push(
-      setInterval(() => {
-        this.broadcastSnapshot();
-      }, 1000 / SNAP_RATE),
     );
     console.log(`[host] listening on port ${this.port} (tick ${this.tickHz}Hz, snap ${SNAP_RATE}Hz)`);
   }
@@ -114,7 +112,9 @@ export class HostServer {
    * At most MAX_CATCHUP steps run per wake; surplus backlog is dropped and
    * counted (slow-motion under extreme load, never a death spiral). The tick
    * counter increments per executed step, so snapshot tick semantics are
-   * unchanged. Snapshot broadcast stays on its own 20Hz wall-clock timer.
+   * unchanged. Snapshots ride the sim clock (every N ticks), not a separate
+   * wall-clock timer — Windows coarse timers (~15.6ms granularity) would
+   * otherwise throttle a 30Hz wall-clock interval down to ~21Hz.
    */
   private pumpSim(dt: number): void {
     const now = Date.now();
@@ -144,6 +144,14 @@ export class HostServer {
       const dropped = Math.floor(this.tickAcc / dt);
       this.tickDrops += dropped;
       this.tickAcc -= dropped * dt;
+    }
+    // Snapshot on the sim clock: exact SNAP_RATE regardless of timer granularity.
+    if (steps > 0) {
+      const snapEvery = Math.max(1, Math.round(this.tickHz / SNAP_RATE));
+      if (this.match.tick - this.lastSnapTick >= snapEvery) {
+        this.lastSnapTick = this.match.tick;
+        this.broadcastSnapshot();
+      }
     }
     if (now - this.healthSince >= HEALTH_LOG_MS) {
       const secs = (now - this.healthSince) / 1000;
@@ -519,6 +527,29 @@ export class HostServer {
         for (const c of this.clients.values()) send(c.ws, end);
       }
     }
+    // Per-client input ack watermark so clients can prune their prediction
+    // buffer precisely (seq echo). Additive optional field: old clients
+    // ignore unknown JSON fields. No version bump.
+    const acks: Record<number, number> = {};
+    for (const c of this.clients.values()) {
+      const seq = c.input.seq;
+      if (typeof seq === "number" && Number.isFinite(seq)) acks[c.id] = Math.floor(seq);
+    }
+    // Strip server-internal sim fields (prediction flags, damage tuning)
+    // so snapshots stay small and stable on the wire.
+    const players = this.match.players.map((p) => ({
+      id: p.id, name: p.name, color: p.color,
+      x: p.x, y: p.y, vx: p.vx, vy: p.vy,
+      facing: p.facing, aimX: p.aimX, aimY: p.aimY,
+      hp: p.hp, alive: p.alive,
+      weapon: p.weapon, ammo: p.ammo, cooldown: p.cooldown,
+      onGround: p.onGround, wins: p.wins, kills: p.kills,
+      isBot: p.isBot, boss: p.boss, maxHp: p.maxHp,
+    }));
+    const projectiles = this.match.projectiles.map((pr) => ({
+      id: pr.id, kind: pr.kind, x: pr.x, y: pr.y, vx: pr.vx, vy: pr.vy,
+      life: pr.life, owner: pr.owner, bounces: pr.bounces,
+    }));
     const msg: ServerMsg = {
       v: PROTOCOL_VERSION,
       t: "snapshot",
@@ -526,14 +557,14 @@ export class HostServer {
       time: this.match.time,
       levelId: this.match.level.id,
       round: this.match.round,
-      players: this.match.players,
-      projectiles: this.match.projectiles,
+      players,
+      projectiles,
       crates: this.match.crates,
       barrels: this.match.barrels,
       drops: this.match.drops,
       events,
+      acks,
     };
-    if (this.customJson) msg.levelJson = this.customJson;
     const raw = JSON.stringify(msg);
     for (const c of this.clients.values()) {
       if (c.ws.readyState === WebSocket.OPEN) c.ws.send(raw);

@@ -1,6 +1,6 @@
 // Shared tuning constants
 export const TICK_RATE = 60;
-export const SNAP_RATE = 20;
+export const SNAP_RATE = 30;
 export const GRAVITY = 2400; // px/s^2
 export const MOVE_SPEED = 420; // px/s
 export const JUMP_SPEED = 950;

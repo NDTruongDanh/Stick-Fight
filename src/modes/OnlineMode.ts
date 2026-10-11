@@ -3,6 +3,8 @@ import type { RosterPlayer, SnapshotMsg } from "../net/NetClient.js";
 import { Predictor } from "../net/predict.js";
 import type { PredictedInput } from "../net/predict.js";
 import {
+  AIR_CONTROL,
+  BOSS_SPEED_MULT,
   GRAVITY,
   JUMP_SPEED,
   MAX_FALL,
@@ -22,6 +24,19 @@ import { drawStick } from "../entities/stick.js";
 
 const PW = 26;
 const PH = 54;
+// Netcode tuning: 60Hz input matches the 60Hz server tick 1:1 so each sent
+// input maps to one sim step; 30Hz snapshots + ~80ms interp delay smooth
+// remotes without adding the old 100ms+33ms input-latency stack.
+const INPUT_HZ = 60;
+const INTERP_DELAY_MS = 80;
+const SNAP_KEEP = 8;
+const REWIND_SNAP_DIST = 120;
+// Wall-slide + wall-jump tuning (mirrors server Match.ts).
+const WALL_SLIDE_CAP = 180;
+const WALL_JUMP_VX = 380;
+const WALL_JUMP_VY_SCALE = 0.92;
+const WALL_LOCK = 0.18;
+const ROTATOR_CARRY = 55;
 
 const FALLBACK_LEVEL: LevelDef = {
   id: "woods1",
@@ -82,6 +97,10 @@ export class OnlineMode {
   private keys = new Set<string>();
   private mouse = { x: 0, y: 0, down: false, rdown: false };
   private prevThrow = false;
+  /** Edge state for prediction jump (mirrors server prevJump per player). */
+  private predPrevJump = false;
+  /** Wall-jump lock timer for the predicted copy (mirrors server wallLocks). */
+  private predWallLock = 0;
   private feed: string[] = [];
   private roster: RosterPlayer[] = [];
   /** Waiting-lobby hooks wired by main.ts: live roster, match-start, fatal close. */
@@ -91,6 +110,8 @@ export class OnlineMode {
   private lastFrame = 0;
   private closed = false;
   private gameBooted = false;
+  /** Fixed-step input accumulator: pumps sendInput() at INPUT_HZ from frame(). */
+  private inputAcc = 0;
   /** Guard so onLobbyStart fires exactly once per start(). */
   private lobbyStartFired = false;
   private sfx = new Sfx();
@@ -168,10 +189,15 @@ export class OnlineMode {
     window.addEventListener("resize", this.onResize);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
-    this.canvas.addEventListener("mousemove", this.onMouseMove);
-    this.canvas.addEventListener("mousedown", this.onMouseDown);
+    // NOTE: mousemove/mousedown must listen on window, not the canvas.
+    // In-game the HUD overlay (absolute inset-0, see Ui.showHud) covers the
+    // canvas, so canvas-targeted listeners never fire — mouse aim + LMB fire
+    // + RMB block would all stay stuck. LocalMode already listens on window
+    // for this reason.
+    window.addEventListener("mousemove", this.onMouseMove);
+    window.addEventListener("mousedown", this.onMouseDown);
     window.addEventListener("mouseup", this.onMouseUp);
-    this.canvas.addEventListener("contextmenu", this.onCtxMenu);
+    window.addEventListener("contextmenu", this.onCtxMenu);
 
     // Wire handlers BEFORE connect so the welcome-adjacent roster broadcast
     // (sent in the same server tick) is never missed.
@@ -250,7 +276,10 @@ export class OnlineMode {
     this.sizeCanvas();
     this.running = true;
     this.lastFrame = performance.now();
-    this.sendTimer = setInterval(() => this.sendInput(), 1000 / 30);
+    this.inputAcc = 0;
+    // Input + prediction run off the RAF clock (fixed 60Hz accumulator), not
+    // a separate setInterval — one clock means no timer drift between
+    // prediction steps and rendered frames.
     const loop = (t: number) => {
       if (!this.running) return;
       this.frame(t);
@@ -270,9 +299,14 @@ export class OnlineMode {
     window.removeEventListener("resize", this.onResize);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
+    window.removeEventListener("mousemove", this.onMouseMove);
+    window.removeEventListener("mousedown", this.onMouseDown);
+    window.removeEventListener("mouseup", this.onMouseUp);
+    window.removeEventListener("contextmenu", this.onCtxMenu);
+    // Defensive: drop any legacy canvas-bound listeners (pre-fix builds bound
+    // mousemove/mousedown/contextmenu to the canvas).
     this.canvas.removeEventListener("mousemove", this.onMouseMove);
     this.canvas.removeEventListener("mousedown", this.onMouseDown);
-    window.removeEventListener("mouseup", this.onMouseUp);
     this.canvas.removeEventListener("contextmenu", this.onCtxMenu);
     this.net.close();
   }
@@ -384,8 +418,9 @@ export class OnlineMode {
     };
     this.predictor.pushLocal(input);
     this.net.sendInput(input);
-    // Apply immediately to the local predicted copy.
-    if (this.me) this.simulateMe(this.me, input, 1 / 30);
+    // Apply immediately to the local predicted copy at the server tick rate
+    // so prediction advances 1:1 with the authoritative sim.
+    if (this.me) this.simulateMe(this.me, input, 1 / INPUT_HZ);
   }
 
   // ---- snapshots / prediction ----
@@ -462,9 +497,11 @@ export class OnlineMode {
       this.bannerT = 2;
     }
     this.snaps.push({ msg: s, at: performance.now() });
-    if (this.snaps.length > 4) this.snaps.shift();
-    // Server tick doubles as the input-ack watermark (tick ~= seq).
-    this.predictor.reconcile(s.players, this.net.clientId, s.tick);
+    if (this.snaps.length > SNAP_KEEP) this.snaps.shift();
+    // Precise ack when the server echoes our seq; old servers fall back to
+    // the tick watermark inside Predictor.
+    const ackSeq = s.acks?.[this.net.clientId];
+    this.predictor.reconcile(s.players, this.net.clientId, s.tick, ackSeq);
     // New projectiles => muzzle flash (+ shot sound) on their owner.
     const ids = new Set<number>();
     for (const pr of s.projectiles) {
@@ -479,97 +516,99 @@ export class OnlineMode {
     if (srv) {
       if (!this.me) {
         this.me = { ...srv };
+        this.predPrevJump = false;
+        this.predWallLock = 0;
       } else {
-        // Snap toward server, then replay unacked inputs (light rewind).
+        // Rewind to the authoritative state, then replay unacked inputs.
+        // Server state is authoritative for hp/alive — never keep a stale
+        // local hp, or damage would appear to do nothing until sudden death.
         const dx = srv.x - this.me.x, dy = srv.y - this.me.y;
-        if (Math.hypot(dx, dy) > 120) {
+        if (Math.hypot(dx, dy) > REWIND_SNAP_DIST) {
           this.me = { ...srv };
         } else {
-          const keepHp = this.me.hp;
-          Object.assign(this.me, { ...srv, hp: srv.hp <= 0 ? 0 : keepHp > srv.hp ? keepHp : srv.hp });
-          for (const u of this.predictor.unacked()) this.simulateMe(this.me, u, 1 / 60);
+          const deadNow = !srv.alive;
+          Object.assign(this.me, srv);
+          if (deadNow) {
+            this.predPrevJump = false;
+            this.predWallLock = 0;
+          } else {
+            // Seed edge state from the last acked input so replayed jumps
+            // match the server's edge detector.
+            const unacked = this.predictor.unacked();
+            for (const u of unacked) this.simulateMe(this.me, u, 1 / INPUT_HZ);
+          }
         }
       }
     }
   }
 
-  private solidsAt(): { x: number; y: number; w: number; h: number }[] {
-    const t = this.snaps.length ? this.snaps[this.snaps.length - 1].msg.time : 0;
-    const out: { x: number; y: number; w: number; h: number }[] = [];
+  /** Extrapolated server time: latest snapshot time + time since receipt. */
+  private clientTime(): number {
+    const last = this.snaps.length ? this.snaps[this.snaps.length - 1] : null;
+    if (!last) return performance.now() / 1000;
+    return last.msg.time + (performance.now() - last.at) / 1000;
+  }
+
+  private solidsAt(): { x: number; y: number; w: number; h: number; type: string; beltPx: number; mi?: number; ri?: number }[] {
+    const t = this.clientTime();
+    const out: { x: number; y: number; w: number; h: number; type: string; beltPx: number; mi?: number; ri?: number }[] = [];
     for (const pl of this.level.platforms) {
       if (pl.type === "blink") {
         const period = pl.period ?? 3, duty = pl.duty ?? 0.6, phase = pl.phase ?? 0;
         if (!(((t + phase) % period) < period * duty)) continue;
       }
-      out.push({ x: pl.x * WORLD_W, y: pl.y * WORLD_H, w: pl.w * WORLD_W, h: pl.h * WORLD_H });
+      out.push({
+        x: pl.x * WORLD_W, y: pl.y * WORLD_H, w: pl.w * WORLD_W, h: pl.h * WORLD_H,
+        type: pl.type ?? "static", beltPx: (pl.beltSpeed ?? 0) * WORLD_W,
+      });
     }
     for (const m of this.level.movers ?? []) {
-      const off = Math.sin((t * Math.PI * 2) / Math.max(0.1, m.period) + (m.phase ?? 0)) * m.range * WORLD_W;
+      const span = m.axis === "x" ? WORLD_W : WORLD_H;
+      const off = Math.sin((t * Math.PI * 2) / Math.max(0.1, m.period) + (m.phase ?? 0)) * m.range * span;
       out.push({
         x: m.x * WORLD_W + (m.axis === "x" ? off : 0),
         y: m.y * WORLD_H + (m.axis === "y" ? off : 0),
-        w: m.w * WORLD_W, h: m.h * WORLD_H,
+        w: m.w * WORLD_W, h: m.h * WORLD_H, type: "mover",
+        beltPx: 0, mi: (this.level.movers ?? []).indexOf(m),
       });
     }
+    for (const r of this.level.rotators ?? []) {
+      const a = t * r.angleSpeed;
+      const pw = r.w * WORLD_W, ph = r.h * WORLD_H;
+      const c = Math.abs(Math.cos(a)), si = Math.abs(Math.sin(a));
+      const bw = pw * c + ph * si, bh = pw * si + ph * c;
+      out.push({
+        x: r.cx * WORLD_W - bw / 2, y: r.cy * WORLD_H - bh / 2, w: bw, h: bh,
+        type: "rotator", beltPx: 0, ri: (this.level.rotators ?? []).indexOf(r),
+      });
+    }
+    // Live crates are solid on the server — include the snapshot positions.
+    const snap = this.latest();
+    for (const c of snap?.crates ?? []) out.push({ x: c.x, y: c.y, w: c.w, h: c.h, type: "static", beltPx: 0 });
     return out;
   }
 
-  private simulateMe(p: PlayerState, inp: PredictedInput, dt: number): void {
-    if (!p.alive) return;
-    const dir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
-    if (dir !== 0) p.facing = dir;
-    p.vx += (dir * MOVE_SPEED - p.vx) * Math.min(1, (p.onGround ? 14 : 7) * dt);
-    p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
-    const solids = this.solidsAt();
-    const ov = (x: number, y: number, s: { x: number; y: number; w: number; h: number }): boolean =>
-      x - PW / 2 < s.x + s.w && x + PW / 2 > s.x && y < s.y + s.h && y + PH > s.y;
-    const dist = Math.max(Math.abs(p.vx * dt), Math.abs(p.vy * dt));
-    const steps = Math.max(1, Math.min(8, Math.ceil(dist / 8)));
-    const h = dt / steps;
-    for (let st = 0; st < steps; st++) {
-      const oldX = p.x;
-      p.x += p.vx * h;
-      for (const s of solids) {
-        if (!ov(p.x, p.y, s)) continue;
-        // Only resolve when X motion caused the overlap; a pre-existing
-        // vertical overlap (jumping up into a deck) must not eject sideways.
-        if (ov(oldX, p.y, s)) continue;
-        if (p.vx > 0) p.x = s.x - PW / 2;
-        else if (p.vx < 0) p.x = s.x + s.w + PW / 2;
-        else {
-          const penL = (p.x + PW / 2) - s.x;
-          const penR = (s.x + s.w) - (p.x - PW / 2);
-          p.x = penL < penR ? s.x - PW / 2 : s.x + s.w + PW / 2;
-        }
-        p.vx = 0;
-      }
-      p.y += p.vy * h;
-      p.onGround = false;
-      for (const s of solids) {
-        if (!ov(p.x, p.y, s)) continue;
-        if (p.vy > 0) {
-          p.y = s.y - PH;
-          p.vy = 0;
-          p.onGround = true;
-        } else if (p.vy < 0) {
-          p.y = s.y + s.h;
-          p.vy = 0;
-        } else {
-          // Resting overlap (reconcile snap inside a solid): escape along the
-          // smallest vertical penetration so the next X pass stays stable.
-          const penT = (p.y + PH) - s.y;
-          const penB = (s.y + s.h) - p.y;
-          if (penT < penB) { p.y = s.y - PH; p.vy = 0; p.onGround = true; }
-          else { p.y = s.y + s.h; p.vy = 0; }
-        }
+  private touchingWall(p: PlayerState, solids: { x: number; y: number; w: number; h: number }[], dir: number): 1 | -1 | 0 {
+    if (dir === 0) return 0;
+    const px = p.x + dir * (PW / 2 + 2);
+    const ys = [p.y + 8, p.y + PH / 2, p.y + PH - 4];
+    for (const s of solids) {
+      for (const y of ys) {
+        if (px > s.x && px < s.x + s.w && y > s.y && y < s.y + s.h) return dir > 0 ? 1 : -1;
       }
     }
-    // Prediction reconcile can snap the body inside a wall — eject via
-    // minimum penetration so sealed areas stay sealed on the client too.
+    return 0;
+  }
+
+  private overlap(x: number, y: number, s: { x: number; y: number; w: number; h: number }): boolean {
+    return x - PW / 2 < s.x + s.w && x + PW / 2 > s.x && y < s.y + s.h && y + PH > s.y;
+  }
+
+  private depenetrate(p: PlayerState, solids: { x: number; y: number; w: number; h: number }[]): void {
     for (let iter = 0; iter < 4; iter++) {
       let hit: { x: number; y: number; w: number; h: number } | null = null;
       for (const s of solids) {
-        if (ov(p.x, p.y, s)) { hit = s; break; }
+        if (this.overlap(p.x, p.y, s)) { hit = s; break; }
       }
       if (!hit) break;
       const s = hit;
@@ -584,10 +623,126 @@ export class OnlineMode {
         p.y = s.y + s.h; p.vy = 0;
       }
     }
-    if (inp.jump && p.onGround) {
+  }
+
+  /** Coyote jump off landed gun drops / crate tops (mirrors server propTop). */
+  private propTop(p: PlayerState): boolean {
+    const snap = this.latest();
+    if (!snap) return false;
+    const feet = p.y + PH;
+    for (const d of snap.drops) {
+      if (d.vy === 0 && Math.abs(d.x - p.x) < 30 && Math.abs(d.y - feet) <= 8) return true;
+    }
+    for (const c of snap.crates) {
+      if (p.x + PW / 2 > c.x && p.x - PW / 2 < c.x + c.w && Math.abs(feet - c.y) <= 8) return true;
+    }
+    return false;
+  }
+
+  private moverDelta(mi: number, dt: number): { dx: number; dy: number } {
+    const m = (this.level.movers ?? [])[mi];
+    if (!m || dt <= 0) return { dx: 0, dy: 0 };
+    const t = this.clientTime();
+    const per = Math.max(0.1, m.period);
+    const span = m.axis === "x" ? WORLD_W : WORLD_H;
+    const f = (tt: number) => Math.sin((tt * Math.PI * 2) / per + (m.phase ?? 0)) * m.range * span;
+    const d = f(t) - f(t - dt);
+    return m.axis === "x" ? { dx: d, dy: 0 } : { dx: 0, dy: d };
+  }
+
+  /** Client prediction: mirrors server Match.movePlayer at fixed 1/60 steps. */
+  private simulateMe(p: PlayerState, inp: PredictedInput, dt: number): void {
+    if (!p.alive) return;
+    const dir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    if (dir !== 0) p.facing = dir;
+    const accel = p.onGround ? 1 : AIR_CONTROL;
+    const speedMult = p.boss ? BOSS_SPEED_MULT : 1;
+    const target = dir * MOVE_SPEED * speedMult;
+    p.vx += (target - p.vx) * Math.min(1, (p.onGround ? 14 : 7) * accel * dt);
+    const solids = this.solidsAt();
+    // Wall-slide probe uses last tick's post-collision state, like the server.
+    this.predWallLock = Math.max(0, this.predWallLock - dt);
+    const wallSide = !p.onGround && dir !== 0 && p.vy > 0 && this.predWallLock <= 0
+      ? this.touchingWall(p, solids, dir)
+      : 0;
+    const sliding = wallSide !== 0;
+    p.vy = Math.min(MAX_FALL, p.vy + GRAVITY * dt);
+    if (sliding && !p.onGround && p.vy > WALL_SLIDE_CAP) p.vy = WALL_SLIDE_CAP;
+    const pressed = inp.jump && !this.predPrevJump;
+    if (pressed && (p.onGround || this.propTop(p))) {
       p.vy = -JUMP_SPEED;
       p.onGround = false;
+    } else if (pressed && sliding && !p.onGround) {
+      p.vx = -wallSide * WALL_JUMP_VX;
+      p.vy = -JUMP_SPEED * WALL_JUMP_VY_SCALE;
+      p.facing = p.vx >= 0 ? 1 : -1;
+      p.onGround = false;
+      this.predWallLock = WALL_LOCK;
     }
+    this.predPrevJump = inp.jump;
+    // Substep integration so one step can never tunnel through a thin wall.
+    const dist = Math.max(Math.abs(p.vx * dt), Math.abs(p.vy * dt));
+    const steps = Math.max(1, Math.min(8, Math.ceil(dist / 8)));
+    const h = dt / steps;
+    let ground: { type: string; beltPx: number; mi?: number; ri?: number } | null = null;
+    for (let st = 0; st < steps; st++) {
+      const oldX = p.x;
+      p.x += p.vx * h;
+      for (const s of solids) {
+        if (!this.overlap(p.x, p.y, s)) continue;
+        if (this.overlap(oldX, p.y, s)) continue;
+        if (p.vx > 0) p.x = s.x - PW / 2;
+        else if (p.vx < 0) p.x = s.x + s.w + PW / 2;
+        else {
+          const penL = (p.x + PW / 2) - s.x;
+          const penR = (s.x + s.w) - (p.x - PW / 2);
+          p.x = penL < penR ? s.x - PW / 2 : s.x + s.w + PW / 2;
+        }
+        p.vx = 0;
+      }
+      p.y += p.vy * h;
+      p.onGround = false;
+      ground = null;
+      for (const s of solids) {
+        if (!this.overlap(p.x, p.y, s)) continue;
+        if (p.vy > 0) {
+          p.y = s.y - PH;
+          p.vy = 0;
+          p.onGround = true;
+          ground = s;
+        } else if (p.vy < 0) {
+          p.y = s.y + s.h;
+          p.vy = 0;
+        } else {
+          const penT = (p.y + PH) - s.y;
+          const penB = (s.y + s.h) - p.y;
+          if (penT < penB) { p.y = s.y - PH; p.vy = 0; p.onGround = true; ground = s; }
+          else { p.y = s.y + s.h; p.vy = 0; }
+        }
+      }
+    }
+    this.depenetrate(p, solids);
+    if (p.onGround) {
+      if (ground?.type === "mover" && ground.mi !== undefined) {
+        const d = this.moverDelta(ground.mi, dt);
+        p.x += d.dx;
+        p.y += d.dy;
+      } else if (ground?.type === "rotator" && ground.ri !== undefined) {
+        const r = (this.level.rotators ?? [])[ground.ri];
+        if (r) p.x += r.angleSpeed * ROTATOR_CARRY * dt;
+      }
+    }
+    if (ground?.type === "bouncy") {
+      p.vy = -1050;
+      p.onGround = false;
+    } else if (ground?.type === "conveyor") {
+      p.x += (ground.beltPx ?? 0) * dt;
+    } else if (ground?.type === "ice") {
+      p.vx *= 1 + Math.min(0.5, dt * 2);
+    }
+    if (inp.down && p.onGround) p.y += 2;
+    p.x = Math.max(-60, Math.min(WORLD_W + 60, p.x));
+    this.depenetrate(p, solids);
     p.aimX = inp.aimX;
     p.aimY = inp.aimY;
   }
@@ -611,6 +766,16 @@ export class OnlineMode {
   private frame(t: number): void {
     const dt = Math.min(0.05, (t - this.lastFrame) / 1000 || 0.016);
     this.lastFrame = t;
+    // Fixed-step input pump: 60Hz sends locked to the render clock.
+    this.inputAcc += dt;
+    const step = 1 / INPUT_HZ;
+    let n = 0;
+    while (this.inputAcc >= step && n < 3) {
+      this.sendInput();
+      this.inputAcc -= step;
+      n++;
+    }
+    if (this.inputAcc > step * 3) this.inputAcc = 0;
     this.shake = Math.max(0, this.shake - dt * 1.6);
     if (this.bannerT > 0 && this.bannerT < 1e8) this.bannerT -= dt;
     for (const [id, m] of this.muzzle) {
@@ -635,7 +800,7 @@ export class OnlineMode {
 
   private interpPlayers(): PlayerState[] {
     if (!this.snaps.length) return [];
-    const renderAt = performance.now() - 100;
+    const renderAt = performance.now() - INTERP_DELAY_MS;
     let a = this.snaps[0], b = this.snaps[this.snaps.length - 1];
     for (let i = 0; i < this.snaps.length - 1; i++) {
       if (this.snaps[i].at <= renderAt && this.snaps[i + 1].at >= renderAt) {
@@ -649,12 +814,26 @@ export class OnlineMode {
     return b.msg.players.map((pb) => {
       const pa = byId.get(pb.id);
       if (!pa) return { ...pb };
-      return { ...pb, x: pa.x + (pb.x - pa.x) * alpha, y: pa.y + (pb.y - pa.y) * alpha };
+      // Lerp position + velocity so remotes glide instead of stepping at
+      // snapshot rate; discrete fields (hp/alive/weapon/wins) snap to newest.
+      return {
+        ...pb,
+        x: pa.x + (pb.x - pa.x) * alpha,
+        y: pa.y + (pb.y - pa.y) * alpha,
+        vx: pa.vx + (pb.vx - pa.vx) * alpha,
+        vy: pa.vy + (pb.vy - pa.vy) * alpha,
+      };
     });
   }
 
   private latest(): SnapshotMsg | null {
     return this.snaps.length ? this.snaps[this.snaps.length - 1].msg : null;
+  }
+
+  /** Milliseconds since the latest snapshot arrived (for extrapolation). */
+  private latestAgeMs(): number {
+    if (!this.snaps.length) return 0;
+    return Math.max(0, performance.now() - this.snaps[this.snaps.length - 1].at);
   }
 
   private pushFeed(text: string): void {
@@ -667,7 +846,7 @@ export class OnlineMode {
     const cw = this.canvas.width, ch = this.canvas.height;
     const { s, ox, oy } = this.view();
     const snap = this.latest();
-    const time = snap?.time ?? performance.now() / 1000;
+    const time = this.clientTime();
     ctx.save();
     ctx.clearRect(0, 0, cw, ch);
     ctx.translate(ox, oy);
@@ -685,7 +864,18 @@ export class OnlineMode {
     this.drawPlatforms(ctx, time);
     if (snap) {
       drawKillRects(ctx, this.level.killRects ?? [], time);
-      drawDrops(ctx, snap.drops, time);
+      // Extrapolate snapshots forward to render time so 30Hz snapshots look
+      // like 60fps motion instead of stepping every 33ms.
+      const ext = Math.min(0.12, this.latestAgeMs() / 1000);
+      const drops = ext > 0.001
+        ? snap.drops.map((d) => ({
+            ...d,
+            vy: Math.min(MAX_FALL, d.vy + GRAVITY * 0.7 * ext),
+            x: d.x + d.vx * ext,
+            y: d.y + d.vy * ext + 0.5 * GRAVITY * 0.7 * ext * ext,
+          }))
+        : snap.drops;
+      drawDrops(ctx, drops, time);
       drawCrates(ctx, snap.crates);
       drawBarrels(ctx, snap.barrels);
       for (const bm of this.beams) {
@@ -704,7 +894,17 @@ export class OnlineMode {
         ctx.stroke();
         ctx.globalAlpha = 1;
       }
-      for (const pr of snap.projectiles) this.drawProjectile(ctx, pr, time);
+      for (const pr of snap.projectiles) {
+        // Linear extrapolation hides the 30Hz snapshot step for fast bullets
+        // (1400-1800px/s moves ~50px per snapshot without it).
+        const life = pr.life - ext;
+        if (life <= 0) continue;
+        if (ext > 0.001 && (pr.vx !== 0 || pr.vy !== 0)) {
+          this.drawProjectile(ctx, { ...pr, x: pr.x + pr.vx * ext, y: pr.y + pr.vy * ext, life }, time);
+        } else {
+          this.drawProjectile(ctx, pr, time);
+        }
+      }
       const players = this.interpPlayers();
       for (const p of players) {
         const show = p.id === this.net.clientId && this.me ? this.me : p;
@@ -783,7 +983,8 @@ export class OnlineMode {
       ctx.fillRect(x, y + h - 3, w, 3);
     }
     for (const m of this.level.movers ?? []) {
-      const off = Math.sin((t * Math.PI * 2) / Math.max(0.1, m.period) + (m.phase ?? 0)) * m.range * WORLD_W;
+      const span = m.axis === "x" ? WORLD_W : WORLD_H;
+      const off = Math.sin((t * Math.PI * 2) / Math.max(0.1, m.period) + (m.phase ?? 0)) * m.range * span;
       const x = m.x * WORLD_W + (m.axis === "x" ? off : 0);
       const y = m.y * WORLD_H + (m.axis === "y" ? off : 0);
       const w = m.w * WORLD_W, h = Math.max(6, m.h * WORLD_H);

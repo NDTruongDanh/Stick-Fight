@@ -16,7 +16,7 @@ export type ServerMsg =
   | { v: number; t: 'reject'; reason: string }
   | { v: number; t: 'roster'; players: { id: number; name: string; slot: number; bot: boolean; color?: string; ready?: boolean }[] }
   | { v: number; t: 'start'; levelId: string; seed: number; levelJson?: string }
-  | { v: number; t: 'snapshot'; tick: number; time: number; levelId: string; round: number; players: SnapshotPlayer[]; projectiles: ProjectileState[]; crates: CrateState[]; barrels: BarrelState[]; drops: DroppedGun[]; events: SnapshotEvent[]; levelJson?: string }
+  | { v: number; t: 'snapshot'; tick: number; time: number; levelId: string; round: number; players: SnapshotPlayer[]; projectiles: ProjectileState[]; crates: CrateState[]; barrels: BarrelState[]; drops: DroppedGun[]; events: SnapshotEvent[]; levelJson?: string; acks?: Record<number, number> }
   | { v: number; t: 'pong'; t0: number }
   | { v: number; t: 'chat'; from: string; text: string }
   | { v: number; t: 'matchEnd'; wins: Record<number, number> };
