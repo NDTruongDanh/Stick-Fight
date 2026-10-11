@@ -3,11 +3,10 @@ import type { ClientMsg, ServerMsg } from "../../shared/protocol.js";
 
 export type SnapshotMsg = Extract<ServerMsg, { t: "snapshot" }>;
 export type RosterMsg = Extract<ServerMsg, { t: "roster" }>;
-export type ChatMsg = Extract<ServerMsg, { t: "chat" }>;
 export type StartMsg = Extract<ServerMsg, { t: "start" }>;
 export type WelcomeMsg = Extract<ServerMsg, { t: "welcome" }>;
-/** Roster entry plus the additive optional `ready` flag the host broadcasts. */
-export type RosterPlayer = RosterMsg["players"][number] & { ready?: boolean };
+/** Roster entry from the host broadcast. */
+export type RosterPlayer = RosterMsg["players"][number];
 
 export interface InputPayload {
   seq: number;
@@ -32,7 +31,6 @@ export class NetClient {
 
   onSnapshot: (s: SnapshotMsg) => void = () => {};
   onRoster: (r: RosterMsg) => void = () => {};
-  onChat: (c: ChatMsg) => void = () => {};
   onStart: (s: StartMsg) => void = () => {};
   onWelcome: (w: WelcomeMsg) => void = () => {};
   onMatchEnd: (wins: Record<number, number>) => void = () => {};
@@ -51,7 +49,7 @@ export class NetClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private maxReconnectAttempts = 5;
   private reconnectBaseMs = 1000;
-  /** Last close followed a server reject (full/kicked/version) — do not retry. */
+  /** Last close followed a server reject (full/version) — do not retry. */
   private rejectFatal = false;
   private manualClose = false;
   private connectResolve: (() => void) | null = null;
@@ -97,7 +95,7 @@ export class NetClient {
       } catch {
         /* listener error — still schedule reconnect below */
       }
-      // No retry after a deliberate close or a fatal reject (full/kicked/version).
+      // No retry after a deliberate close or a fatal reject (full/version).
       if (this.manualClose || this.rejectFatal) {
         this.rejectFatal = false;
         if (!this.manualClose && !this.lastError) this.lastError = "disconnected";
@@ -138,13 +136,6 @@ export class NetClient {
     ws.send(JSON.stringify(msg));
   }
 
-  sendChat(text: string): void {
-    const ws = this.ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const msg: ClientMsg = { v: PROTOCOL_VERSION, t: "chat", text: text.slice(0, 200) };
-    ws.send(JSON.stringify(msg));
-  }
-
   close(): void {
     this.manualClose = true;
     if (this.reconnectTimer) {
@@ -162,7 +153,7 @@ export class NetClient {
 
   /**
    * Manually (re)connect, resetting backoff state. Use after a fatal reject
-   * (e.g. kick) or exhausted auto-retries, e.g. from a retry button.
+   * (e.g. server full) or exhausted auto-retries, e.g. from a retry button.
    */
   reconnect(): void {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
@@ -219,7 +210,7 @@ export class NetClient {
         break;
       case "reject":
         this.lastError = msg.reason;
-        // Fatal: the server refused us (full / kicked / version) — onclose must not retry.
+        // Fatal: the server refused us (full / version) — onclose must not retry.
         this.rejectFatal = true;
         if (this.connectReject) {
           const rej = this.connectReject;
@@ -234,9 +225,6 @@ export class NetClient {
         break;
       case "roster":
         this.onRoster(msg);
-        break;
-      case "chat":
-        this.onChat(msg);
         break;
       case "start":
         this.levelId = msg.levelId;

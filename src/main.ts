@@ -161,41 +161,20 @@ async function startOnline(url: string, name: string): Promise<void> {
     const m = new OnlineMode(canvas, url, name);
     mode = m;
     let inLobby = true;
-    type RosterEntry = { id: number; name: string; slot?: number; bot: boolean; color?: string; ready?: boolean };
-    // Recompute lobby view-model from the server roster: every player + ready
-    // flags, YOU/HOST tags, and the host START gate (enabled only when every
-    // connected human is ready).
+    type RosterEntry = { id: number; name: string; slot?: number; bot: boolean; color?: string };
+    // Recompute lobby view-model from the server roster: every player with
+    // a YOU tag for the local client.
     const refreshLobby = (roster: RosterEntry[]): void => {
       const myId = m.myId;
-      const humans = roster.filter((p) => !p.bot);
-      const readyCount = humans.filter((p) => p.ready).length;
-      const allReady = humans.length > 0 && humans.every((p) => p.ready);
-      const me = roster.find((p) => p.id === myId);
-      const selfReady = !!me?.ready;
-      const isHost = (me as { slot?: number } | undefined)?.slot === 0;
       ui.updateLobby(
         roster.map((p, i) => ({
           name: p.name,
           color: p.color ?? PLAYER_COLORS[(p.slot ?? i) % PLAYER_COLORS.length],
           bot: !!p.bot,
-          ready: !!p.ready,
           id: p.id,
           slot: p.slot,
           isSelf: p.id === myId,
-          isHost: (p.slot ?? -1) === 0,
         })),
-        {
-          isHost,
-          canStart: isHost && allReady,
-          selfReady,
-          startHint: isHost
-            ? allReady
-              ? 'everyone is ready — start the match!'
-              : `waiting for ready: ${readyCount}/${humans.length} ready`
-            : selfReady
-              ? 'you are ready ✓ — waiting for the host to start…'
-              : 'press READY UP — the host starts when everyone is ready',
-        },
       );
     };
     const showGameHud = (): void => {
@@ -214,27 +193,9 @@ async function startOnline(url: string, name: string): Promise<void> {
         title: 'LOBBY — ONLINE',
         addr: url,
         players: [],
-        hint: 'ready up below — the host starts the match once everyone is ready',
-        isHost: false,
-        canStart: false,
-        selfReady: false,
-        startHint: 'connecting…',
+        hint: 'match starts automatically once 2+ players have joined',
       },
       {
-        onToggleReady: () => {
-          try {
-            m.toggleReady();
-          } catch {
-            /* not connected yet — roster will fill in */
-          }
-        },
-        onStart: () => {
-          try {
-            m.hostStart();
-          } catch {
-            /* not connected yet — roster will fill in */
-          }
-        },
         onLeave: () => {
           inLobby = false;
           stopMode();
@@ -260,7 +221,7 @@ async function startOnline(url: string, name: string): Promise<void> {
       if (!inLobby) return;
       inLobby = false;
       stopMode();
-      ui.toast(err && /kick|full|version|exhausted/i.test(err) ? err : 'Connection closed');
+      ui.toast(err && /full|version|exhausted/i.test(err) ? err : 'Connection closed');
       showMenu();
     };
     await m.start();

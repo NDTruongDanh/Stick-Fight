@@ -82,16 +82,12 @@ export interface LobbyPlayer {
   name: string;
   color: string;
   bot: boolean;
-  /** Ready flag from the host roster broadcast (undefined = old server). */
-  ready?: boolean;
-  /** Client id from the roster broadcast (used for YOU / host detection). */
+  /** Client id from the roster broadcast (used for YOU detection). */
   id?: number;
-  /** Slot from the roster broadcast (slot 0 = host). */
+  /** Slot from the roster broadcast (drives color fallback). */
   slot?: number;
   /** True for the local player. */
   isSelf?: boolean;
-  /** True for slot 0 (the host). */
-  isHost?: boolean;
 }
 
 export interface EditorHandlers {
@@ -118,21 +114,11 @@ export interface LobbyInfo {
   title: string;
   addr?: string;
   players: LobbyPlayer[];
-  /** Optional footer line (e.g. host chat commands). Rendered as plain text. */
+  /** Optional footer line. Rendered as plain text. */
   hint?: string;
-  /** True when the local player is the host (slot 0) — shows START. */
-  isHost?: boolean;
-  /** Host START enabled only when every player is ready. */
-  canStart?: boolean;
-  /** Local player's ready flag — drives the READY button label. */
-  selfReady?: boolean;
-  /** Small status line under the buttons (e.g. waiting-for-ready reason). */
-  startHint?: string;
 }
 
 export interface LobbyHandlers {
-  onToggleReady(): void;
-  onStart(): void;
   onLeave(): void;
 }
 
@@ -258,9 +244,7 @@ function footerHTML(): string {
 }
 
 function lobbyCountText(players: LobbyPlayer[]): string {
-  const humans = players.filter((p) => !p.bot);
-  const ready = humans.filter((p) => p.ready).length;
-  return `${players.length}/4 players · ${ready}/${humans.length} ready`;
+  return `${players.length}/4 players`;
 }
 
 function lobbyChipsHTML(players: LobbyPlayer[]): string {
@@ -268,10 +252,8 @@ function lobbyChipsHTML(players: LobbyPlayer[]): string {
     .map((p) => {
       const badge = p.bot
         ? `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-purple-700 text-purple-100">BOT</span>`
-        : p.ready
-          ? `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-green-700 text-green-100">READY ✓</span>`
-          : `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-neutral-700 text-neutral-300">WAITING</span>`;
-      const tags = `${p.isHost ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-yellow-600 text-yellow-50" title="host">👑 HOST</span>` : ''}${p.isSelf ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-blue-700 text-blue-50">YOU</span>` : ''}`;
+        : '';
+      const tags = `${p.isSelf ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-blue-700 text-blue-50">YOU</span>` : ''}`;
       return `<div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-800 border ${p.isSelf ? 'border-blue-600' : 'border-neutral-700'}">
         <span class="w-4 h-4 rounded-full shrink-0" style="background:${p.color}"></span>
         <span class="font-bold text-sm">${esc(p.name)}</span>${tags ? `<span class="flex gap-1">${tags}</span>` : ''}${badge}</div>`;
@@ -284,8 +266,6 @@ export class Ui {
   private screen: HTMLElement;
   private toasts: HTMLElement;
   private hudRaf = 0;
-  /** Handlers from the last showLobby call — used to wire a late-added START button. */
-  private lobbyCb: LobbyHandlers | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -298,7 +278,6 @@ export class Ui {
   clear(): void {
     cancelAnimationFrame(this.hudRaf);
     this.hudRaf = 0;
-    this.lobbyCb = null;
     this.screen.innerHTML = '';
   }
 
@@ -390,11 +369,6 @@ export class Ui {
                  <input id="s-custom-file" type="file" accept=".json,application/json"
                    class="mt-2 block w-full text-[12px] text-neutral-400 file:mr-2 file:px-3 file:py-1 file:rounded file:border file:border-neutral-900 file:bg-neutral-700 file:text-neutral-100" />
                  <span id="s-custom-status" class="block mt-1 text-neutral-500"></span>
-                </div>
-                <div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
-                  <span class="font-bold text-neutral-200">Lobby chat commands</span><br />
-                  <span class="text-neutral-400">Players: <span class="font-mono text-green-300">/ready</span> · <span class="font-mono text-green-300">/unready</span> — auto-starts when all 2+ are ready.</span><br />
-                  <span class="text-neutral-400">Host (first player): <span class="font-mono text-green-300">/start</span> force-start · <span class="font-mono text-green-300">/restart</span> reset scores + round 1 · <span class="font-mono text-green-300">/kick &lt;name&gt;</span> · <span class="font-mono text-green-300">/bots &lt;n&gt;</span></span>
                 </div>`
             : ''
         }
@@ -473,8 +447,6 @@ export class Ui {
   }
 
   showLobby(info: LobbyInfo, cb: LobbyHandlers): void {
-    const readyLabel = info.selfReady ? 'UNREADY' : 'READY UP ✓';
-    const startDisabled = info.isHost && !info.canStart ? 'disabled' : '';
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-1">${esc(info.title)}</h2>
       ${
         info.addr
@@ -491,63 +463,21 @@ export class Ui {
           : ''
       }
       <div class="flex flex-col gap-2.5">
-        <button id="l-ready" class="${BTN_YELLOW}">${readyLabel}</button>
-        ${
-          info.isHost
-            ? `<button id="l-start" class="${BTN_GREEN} disabled:opacity-40 disabled:cursor-not-allowed" ${startDisabled}>START MATCH ▶</button>`
-            : ''
-        }
         <button id="l-leave" class="${BTN_GHOST}">LEAVE</button>
-      </div>
-      <p id="lobby-starthint" class="text-center text-[11px] text-neutral-500 mt-2">${esc(
-        info.startHint ?? (info.isHost ? 'start unlocks when everyone is ready' : 'waiting for the host to start…'),
-      )}</p>`);
-    this.lobbyCb = cb;
-    (this.screen.querySelector('#l-ready') as HTMLButtonElement).onclick = () => cb.onToggleReady();
-    const startBtn = this.screen.querySelector<HTMLButtonElement>('#l-start');
-    if (startBtn) startBtn.onclick = () => cb.onStart();
+      </div>`);
     (this.screen.querySelector('#l-leave') as HTMLButtonElement).onclick = () => cb.onLeave();
   }
 
   /**
-   * Live-update lobby chips + player count + button states (e.g. from
-   * NetClient onRoster) without rebuilding the buttons, so handlers stay
-   * wired. No-op when no lobby is shown.
+   * Live-update lobby chips + player count (e.g. from NetClient onRoster).
+   * No-op when no lobby is shown.
    */
-  updateLobby(
-    players: LobbyPlayer[],
-    state: { isHost?: boolean; canStart?: boolean; selfReady?: boolean; startHint?: string } = {},
-  ): void {
+  updateLobby(players: LobbyPlayer[]): void {
     const chips = this.screen.querySelector('#lobby-players');
     if (!chips && !this.screen.querySelector('#lobby-count')) return;
     if (chips) chips.innerHTML = lobbyChipsHTML(players);
     const count = this.screen.querySelector('#lobby-count');
     if (count) count.textContent = lobbyCountText(players);
-    const readyBtn = this.screen.querySelector<HTMLButtonElement>('#l-ready');
-    if (readyBtn) readyBtn.textContent = state.selfReady ? 'UNREADY' : 'READY UP ✓';
-    // Host-only START button: create it on promotion to host (wired to the
-    // stored handlers), remove on demotion, otherwise flip disabled flag.
-    let startBtn = this.screen.querySelector<HTMLButtonElement>('#l-start');
-    if (state.isHost && !startBtn) {
-      const leaveBtn = this.screen.querySelector<HTMLButtonElement>('#l-leave');
-      const btn = document.createElement('button');
-      btn.id = 'l-start';
-      btn.className = `${BTN_GREEN} disabled:opacity-40 disabled:cursor-not-allowed`;
-      btn.textContent = 'START MATCH ▶';
-      const cb = this.lobbyCb;
-      if (cb) btn.onclick = () => cb.onStart();
-      if (leaveBtn?.parentElement) leaveBtn.parentElement.insertBefore(btn, leaveBtn);
-      startBtn = btn;
-    } else if (!state.isHost && startBtn) {
-      startBtn.remove();
-      startBtn = null;
-    }
-    if (startBtn) {
-      if (state.canStart) startBtn.removeAttribute('disabled');
-      else startBtn.setAttribute('disabled', '');
-    }
-    const hint = this.screen.querySelector('#lobby-starthint');
-    if (hint && state.startHint !== undefined) hint.textContent = state.startHint;
   }
 
   showHow(cb: { onBack(): void }): void {

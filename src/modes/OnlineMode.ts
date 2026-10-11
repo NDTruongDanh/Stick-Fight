@@ -146,27 +146,6 @@ export class OnlineMode {
     return this.net.clientId;
   }
 
-  /** FIGHT! from the waiting lobby: host force-starts, others toggle ready. */
-  lobbyFight(): void {
-    const me = this.roster.find((p) => p.id === this.net.clientId);
-    if (me && (me as { slot?: number }).slot === 0) {
-      this.hostStart();
-    } else {
-      this.toggleReady();
-    }
-  }
-
-  /** Host-only: ask the server to start the match (/start). */
-  hostStart(): void {
-    this.net.sendChat("/start");
-  }
-
-  /** Toggle /ready ↔ /unready based on our current roster flag. */
-  toggleReady(): void {
-    const me = this.roster.find((p) => p.id === this.net.clientId);
-    this.net.sendChat(me?.ready ? "/unready" : "/ready");
-  }
-
   private fireLobbyStart(): void {
     if (this.lobbyStartFired) return;
     this.lobbyStartFired = true;
@@ -223,12 +202,11 @@ export class OnlineMode {
         /* listener error — roster still cached */
       }
     };
-    this.net.onChat = (c) => this.pushFeed(`${c.from}: ${c.text}`);
     this.net.onClose = () => {
       const err = this.net.lastError;
-      // Fatal rejects (kick/full/version) carry the server reason — surface it
+      // Fatal rejects (full/version) carry the server reason — surface it
       // via the existing feed path instead of the generic retry line.
-      if (err && /kick|full|version|exhausted/i.test(err)) {
+      if (err && /full|version|exhausted/i.test(err)) {
         this.pushFeed(err);
         if (!this.started) {
           try {
@@ -352,12 +330,6 @@ export class OnlineMode {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(e.code)) e.preventDefault();
     this.keys.add(e.code);
-    // Lobby quick-ready: T toggles /ready ↔ /unready (host chat command).
-    // Gated to pre-start so in-game T presses never spam chat.
-    if (e.code === "KeyT" && !e.repeat && !this.started) {
-      const me = this.roster.find((p) => p.id === this.net.clientId);
-      this.net.sendChat(me?.ready ? "/unready" : "/ready");
-    }
   };
   private onKeyUp = (e: KeyboardEvent): void => {
     this.keys.delete(e.code);
@@ -1129,7 +1101,7 @@ export class OnlineMode {
     void dpr;
     if (!snap) {
       const err = this.net.lastError;
-      if (err && /kick|full|version|exhausted/i.test(err)) {
+      if (err && /full|version|exhausted/i.test(err)) {
         ctx.fillStyle = "#f87171";
         ctx.fillText(err.slice(0, 42), 18, 34);
       } else {
@@ -1137,10 +1109,8 @@ export class OnlineMode {
         ctx.fillText("connecting…", 18, 34);
       }
       if (this.roster.length && !this.started) {
-        const humans = this.roster.filter((p) => !p.bot);
-        const ready = humans.filter((p) => p.ready).length;
         ctx.fillStyle = "#fff";
-        ctx.fillText(`lobby ${this.roster.length}/4 · ${ready}/${humans.length} ready — press T`, 18, 52);
+        ctx.fillText(`lobby ${this.roster.length}/4 · waiting for players…`, 18, 52);
       }
       if (!this.started && this.net.reconnectAttempts > 0) {
         ctx.fillStyle = "#facc15";
@@ -1173,11 +1143,9 @@ export class OnlineMode {
     ctx.textAlign = "left";
     ctx.fillStyle = "#93c5fd";
     const winsById = new Map(snap.players.map((p) => [p.id, p.wins]));
-    const readyById = new Map(this.roster.map((p) => [p.id, !!p.ready]));
     this.roster.slice(0, 4).forEach((r, i) => {
       const w = winsById.get(r.id) ?? 0;
-      const mark = !this.started && readyById.get(r.id) ? " ✓" : "";
-      ctx.fillText(`${r.bot ? "[bot]" : ""}${r.name} ★${w}${mark}`, 18, ch - 90 + i * 16);
+      ctx.fillText(`${r.bot ? "[bot]" : ""}${r.name} ★${w}`, 18, ch - 90 + i * 16);
     });
     ctx.fillStyle = "#e5e7eb";
     this.feed.slice(-5).forEach((f, i) => {
@@ -1185,22 +1153,16 @@ export class OnlineMode {
     });
     if (!this.started) {
       const total = this.roster.length;
-      const humans = this.roster.filter((p) => !p.bot);
-      const ready = humans.filter((p) => p.ready).length;
-      const meReady = !!this.roster.find((p) => p.id === this.net.clientId)?.ready;
       const err = this.net.lastError;
-      const fatal = err && /kick|full|version|exhausted/i.test(err) ? err : null;
+      const fatal = err && /full|version|exhausted/i.test(err) ? err : null;
       ctx.fillStyle = "rgba(0,0,0,0.6)";
       ctx.fillRect(cw / 2 - 220, ch / 2 - 42, 440, fatal ? 96 : 76);
       ctx.textAlign = "center";
       ctx.font = "15px monospace";
       ctx.fillStyle = "#fff";
-      ctx.fillText(`lobby ${total}/4 · ${ready}/${humans.length} ready`, cw / 2, ch / 2 - 10);
-      ctx.fillStyle = meReady ? "#4ade80" : "#facc15";
-      ctx.fillText(
-        meReady ? "you're READY ✓ — press T to unready" : "press T when ready",
-        cw / 2, ch / 2 + 14,
-      );
+      ctx.fillText(`lobby ${total}/4 · waiting for players…`, cw / 2, ch / 2 - 10);
+      ctx.fillStyle = "#facc15";
+      ctx.fillText("match starts automatically", cw / 2, ch / 2 + 14);
       if (fatal) {
         ctx.fillStyle = "#f87171";
         ctx.font = "12px monospace";

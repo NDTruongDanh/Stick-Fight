@@ -13,8 +13,6 @@ interface ClientInfo {
   ws: WebSocket;
   input: MatchInput;
   helloOk: boolean;
-  /** Lobby ready flag (/ready /unready). Not part of the sim. */
-  ready: boolean;
 }
 
 const send = (ws: WebSocket, msg: ServerMsg): void => {
@@ -47,8 +45,6 @@ export class HostServer {
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private seed = (Math.random() * 2 ** 31) | 0;
   private customJson: string | null = null;
-  /** Sequence for unique runtime bot names (BOT-<n>). */
-  private nextBotSeq = 1;
   /** Tick of the last broadcast snapshot (snapshots ride the sim clock). */
   private lastSnapTick = 0;
 
@@ -72,7 +68,6 @@ export class HostServer {
       this.match = new Match(level, { cycle: [...LEVELS], winsTarget: this.winsTarget });
     }
     this.addInitialBots(botCount);
-    this.nextBotSeq = Math.max(0, Math.min(MAX_PLAYERS, Math.floor(botCount) || 0)) + 1;
   }
 
   start(): void {
@@ -193,7 +188,7 @@ export class HostServer {
     }
     const id = this.nextId++;
     const slot = this.firstFreeSlot();
-    const info: ClientInfo = { id, slot, name: `P${id}`, ws, input: emptyInput(), helloOk: false, ready: false };
+    const info: ClientInfo = { id, slot, name: `P${id}`, ws, input: emptyInput(), helloOk: false };
     this.clients.set(id, info);
 
     const helloTimeout = setTimeout(() => {
@@ -225,7 +220,6 @@ export class HostServer {
           this.trimBots();
           send(ws, { v: PROTOCOL_VERSION, t: "welcome", clientId: id, slot, levelId: this.match.level.id });
           this.broadcastRoster();
-          this.chat("server", `${info.name} joined (${this.clients.size}/${MAX_PLAYERS})`);
           this.maybeAutoStart();
           // Late join to a running match: catch the newcomer up so they skip
           // the lobby and drop straight into the game.
@@ -244,11 +238,6 @@ export class HostServer {
         case "ping":
           send(ws, { v: PROTOCOL_VERSION, t: "pong", t0: msg.t0 });
           break;
-        case "chat": {
-          const text = String(msg.text).slice(0, 200);
-          if (info.helloOk) this.handleChat(info, text);
-          break;
-        }
       }
     });
 
@@ -258,9 +247,11 @@ export class HostServer {
       if (had) {
         this.match.removePlayer(id);
         this.broadcastRoster();
-        if (info.helloOk) this.chat("server", `${info.name} left`);
-        // A non-ready player leaving may leave everyone else all-ready.
-        this.checkReadyStart();
+        // Dropping below 2 humans cancels a pending auto-start.
+        if (!this.started && this.humans() < 2 && this.startTimer) {
+          clearTimeout(this.startTimer);
+          this.startTimer = null;
+        }
       }
     });
     ws.on("error", () => {
@@ -295,187 +286,18 @@ export class HostServer {
   private broadcastRoster(): void {
     const slots = new Map<number, number>();
     for (const c of this.clients.values()) slots.set(c.id, c.slot);
-    // `ready`/`color` are additive optional flags: old clients ignore unknown
-    // JSON fields, new clients read them via an optional cast. No version bump.
-    const players: { id: number; name: string; slot: number; bot: boolean; color?: string; ready?: boolean }[] =
+    // `color` is an additive optional flag: old clients ignore unknown
+    // JSON fields. No version bump.
+    const players: { id: number; name: string; slot: number; bot: boolean; color?: string }[] =
       this.match.players.map((p, i) => ({
         id: p.id,
         name: p.name,
         slot: slots.get(p.id) ?? i,
         bot: !!p.isBot,
         color: p.color,
-        ready: p.isBot ? true : (this.clients.get(p.id)?.ready ?? false),
       }));
     const msg = { v: PROTOCOL_VERSION, t: "roster", players } as unknown as ServerMsg;
     for (const c of this.clients.values()) send(c.ws, msg);
-  }
-
-  private chat(from: string, text: string): void {
-    const msg: ServerMsg = { v: PROTOCOL_VERSION, t: "chat", from, text };
-    for (const c of this.clients.values()) send(c.ws, msg);
-  }
-
-  /** Host = slot 0, i.e. the first client to join. Host-only chat commands. */
-  private isHost(info: ClientInfo): boolean {
-    return info.slot === 0;
-  }
-
-  /** Private server note to one client (usage errors, unknown commands). */
-  private tell(info: ClientInfo, text: string): void {
-    send(info.ws, { v: PROTOCOL_VERSION, t: "chat", from: "server", text });
-  }
-
-  private readyCount(): number {
-    let n = 0;
-    for (const c of this.clients.values()) if (c.helloOk && c.ready) n++;
-    return n;
-  }
-
-  /**
-   * Slash-command lobby controls. Plain (non-slash) text is broadcast as chat;
-   * slash input is consumed as a command and never rebroadcast.
-   */
-  private handleChat(info: ClientInfo, text: string): void {
-    const trimmed = text.trim();
-    if (!trimmed.startsWith("/")) {
-      this.chat(info.name, text);
-      return;
-    }
-    const [rawCmd, ...rest] = trimmed.slice(1).split(/\s+/);
-    const cmd = (rawCmd || "").toLowerCase();
-    const arg = rest.join(" ").slice(0, 32);
-    switch (cmd) {
-      case "ready": {
-        info.ready = true;
-        this.broadcastRoster();
-        this.chat("server", `${info.name} is READY (${this.readyCount()}/${this.humans()}) — /unready to cancel`);
-        this.checkReadyStart();
-        break;
-      }
-      case "unready": {
-        info.ready = false;
-        this.broadcastRoster();
-        this.chat("server", `${info.name} is not ready (${this.readyCount()}/${this.humans()})`);
-        break;
-      }
-      case "start": {
-        if (!this.isHost(info)) {
-          this.tell(info, "only the host can use /start");
-          break;
-        }
-        this.startMatch(true);
-        break;
-      }
-      case "restart": {
-        if (!this.isHost(info)) {
-          this.tell(info, "only the host can use /restart");
-          break;
-        }
-        this.doRestart(info.name);
-        break;
-      }
-      case "kick": {
-        if (!this.isHost(info)) {
-          this.tell(info, "only the host can use /kick");
-          break;
-        }
-        if (!arg) {
-          this.tell(info, "usage: /kick <name>");
-          break;
-        }
-        const target = [...this.clients.values()].find(
-          (c) => c.helloOk && c.name.toLowerCase() === arg.toLowerCase(),
-        );
-        if (!target) {
-          this.tell(info, `no player named "${arg}"`);
-          break;
-        }
-        if (target.slot === 0) {
-          this.tell(info, "cannot kick the host");
-          break;
-        }
-        this.chat("server", `${target.name} was kicked by the host`);
-        send(target.ws, { v: PROTOCOL_VERSION, t: "reject", reason: "kicked by host" });
-        try {
-          target.ws.close();
-        } catch {
-          /* handled by close */
-        }
-        break;
-      }
-      case "bots": {
-        if (!this.isHost(info)) {
-          this.tell(info, "only the host can use /bots");
-          break;
-        }
-        const n = Number(arg);
-        if (!Number.isInteger(n) || n < 0 || n > MAX_PLAYERS) {
-          this.tell(info, `usage: /bots <0-${MAX_PLAYERS}>`);
-          break;
-        }
-        const applied = this.setBotCount(n);
-        this.broadcastRoster();
-        this.chat("server", `bots set to ${applied} by ${info.name}`);
-        break;
-      }
-      default: {
-        const hostCmds = this.isHost(info) ? " /start /restart /kick <name> /bots <n>" : "";
-        this.tell(info, `unknown command "/${cmd}" — try /ready /unready${hostCmds}`);
-        break;
-      }
-    }
-  }
-
-  /** Auto-start when every connected human (min 2) is /ready. */
-  private checkReadyStart(): void {
-    if (this.started) return;
-    const humans = [...this.clients.values()].filter((c) => c.helloOk);
-    if (humans.length >= 2 && humans.every((c) => c.ready)) {
-      this.chat("server", "all players ready — starting!");
-      this.startMatch(false);
-    }
-  }
-
-  /** Host /restart: clear match scores and open a fresh round 1. */
-  private doRestart(by: string): void {
-    this.match.wins = {};
-    for (const p of this.match.players) {
-      p.wins = 0;
-      p.kills = 0;
-    }
-    this.match.round = 1;
-    // resetArena is Match-internal; snapshots carry the fresh arena.
-    (this.match as unknown as { resetArena(): void }).resetArena();
-    this.broadcastRoster();
-    this.chat("server", `match restarted by ${by} — scores cleared, round 1`);
-  }
-
-  /** Host /bots: set bot count, clamped so humans + bots stay within MAX_PLAYERS. */
-  private setBotCount(n: number): number {
-    const capped = Math.max(0, Math.min(MAX_PLAYERS - this.humans(), n));
-    const bots = this.match.players.filter((p) => p.isBot);
-    if (bots.length < capped) {
-      const used = new Set(this.match.players.map((p) => p.id));
-      let need = capped - bots.length;
-      let cand = -1000;
-      while (need > 0) {
-        if (!used.has(cand)) {
-          this.match.addPlayer(cand, `BOT-${this.nextBotSeq++}`, undefined, true);
-          used.add(cand);
-          need--;
-        }
-        cand--;
-      }
-    } else if (bots.length > capped) {
-      let excess = bots.length - capped;
-      for (const b of bots) {
-        if (excess <= 0) break;
-        this.match.removePlayer(b.id);
-        excess--;
-      }
-    }
-    this.trimBots();
-    return capped;
   }
 
   private humans(): number {
@@ -485,14 +307,17 @@ export class HostServer {
   }
 
   private maybeAutoStart(): void {
-    // Ready-gated lobby: the match ONLY starts when every connected human
-    // (min 2) is /ready, or when the host force-starts with /start.
-    // No timed auto-start — joining always lands in the lobby menu first.
-    if (this.started || this.humans() < 2) return;
-    this.chat("server", "lobby: type /ready — starting when everyone is ready (host: /start to force)");
+    // No-chat lobby: the match starts automatically ~3s after 2+ humans
+    // have joined. Solo joiners wait in the lobby until a second player
+    // arrives.
+    if (this.started || this.humans() < 2 || this.startTimer) return;
+    this.startTimer = setTimeout(() => {
+      this.startTimer = null;
+      if (!this.started && this.humans() >= 2) this.startMatch();
+    }, 3000);
   }
 
-  private startMatch(forced: boolean): void {
+  private startMatch(): void {
     if (this.started) return;
     this.started = true;
     if (this.startTimer) {
@@ -502,7 +327,6 @@ export class HostServer {
     const msg: ServerMsg = { v: PROTOCOL_VERSION, t: "start", levelId: this.match.level.id, seed: this.seed };
     if (this.customJson) msg.levelJson = this.customJson;
     for (const c of this.clients.values()) send(c.ws, msg);
-    this.chat("server", forced ? "match started by host" : "match started!");
   }
 
   /** Single-client (re)start notice for late joins to a running match. */

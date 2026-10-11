@@ -148,7 +148,7 @@ Click **LEVEL EDITOR** on the menu to paste or edit level JSON, then
 
 ## Roadmap
 
-- Online: player skins, rematch voting, chat, reconnection
+- Online: player skins, rematch voting, reconnection
 - Sound effects + music, screen-shake tuning, particle polish
 - Mobile / touch controls
 - Docker image for one-command LAN hosting (see Docker LAN host section)
