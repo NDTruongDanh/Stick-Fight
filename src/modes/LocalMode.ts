@@ -79,7 +79,7 @@ export class LocalMode {
   private mouse = { x: W / 2, y: H / 2, fire: false, block: false };
   private players: R[] = []; private projs: Proj[] = []; private drops: DroppedGun[] = [];
   private crates: { x: number; y: number; w: number; h: number; vx: number; vy: number }[] = [];
-  private barrels: { x: number; y: number; hp: number }[] = [];
+  private barrels: { x: number; y: number; hp: number; vx?: number; vy?: number }[] = [];
   private fuses: { x: number; y: number; t: number; r: number; dmg: number; owner: number }[] = [];
   private parts: Part[] = []; private feed: string[] = []; private beams: Beam[] = [];
   private levelIdx = 0; private time = 0; private round = 1;
@@ -201,7 +201,7 @@ export class LocalMode {
       p.vx = 0; p.vy = 0; p.hp = PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = ''; p.frostT = 0; p.glueT = 0; p.slide = false; p.wallD = 0; p.wallLock = 0;
     });
     this.projs = []; this.fuses = []; this.drops = []; this.beams = []; this.dropRespawn = [];
-    this.crates = (lv.crates ?? []).map((c) => ({ x: c.x * W, y: c.y * H, w: c.w * W, h: c.h * H, vx: 0, vy: 0 })); this.barrels = (lv.barrels ?? []).map((b) => ({ x: b.x * W, y: b.y * H, hp: 30 }));
+    this.crates = (lv.crates ?? []).map((c) => ({ x: c.x * W, y: c.y * H, w: c.w * W, h: c.h * H, vx: 0, vy: 0 })); this.barrels = (lv.barrels ?? []).map((b) => ({ x: b.x * W, y: b.y * H, hp: 30, vx: 0, vy: 0 }));
     lv.weaponDrops.slice(0, 2).forEach((d) => this.spawnDrop(d[0] * W));
   }
 
@@ -416,6 +416,14 @@ export class LocalMode {
     this.bannerT = this.matchOver ? 1e9 : this.roundLock;
   }
 
+  /** Damage a center-anchored barrel; death queues a short fuse (chain boom). */
+  private damageBarrel(b: { x: number; y: number; hp: number }, dmg: number, owner: number): void {
+    if (b.hp <= 0) return;
+    b.hp -= dmg;
+    if (b.hp > 0) return;
+    this.fuses.push({ x: b.x, y: b.y, t: 0.1, r: 150, dmg: 55, owner });
+  }
+
   private explode(x: number, y: number, r: number, dmg: number, owner: number): void {
     this.burst(x, y, 30, '#fb923c'); this.burst(x, y, 16, '#525252'); this.shake = Math.max(this.shake, 0.5);
     this.sfx.boom();
@@ -428,7 +436,11 @@ export class LocalMode {
         const f = 1 - (d / r) * 0.6; const dealt = p.id === owner ? Math.min(dmg * f, 50) : dmg * f; this.hurt(p, dealt, (dx / (d || 1)) * 650 * f, -380 * f, owner, 'explosion');
       }
     }
-    for (const b of this.barrels) if (b.hp > 0 && Math.hypot(b.x - x, b.y - y) < r) { b.hp = 0; this.fuses.push({ x: b.x, y: b.y, t: 0.12, r: 150, dmg: 55, owner }); }
+    for (const b of this.barrels) {
+      if (b.hp <= 0 || Math.hypot(b.x - x, b.y - y) >= r) continue;
+      if (this.segmentBlocked(x, y, b.x, b.y, solids)) continue;
+      b.hp = 0; this.fuses.push({ x: b.x, y: b.y, t: 0.12, r: 150, dmg: 55, owner });
+    }
   }
 
   private nearestEnemy(b: R): R | null {
@@ -517,12 +529,32 @@ export class LocalMode {
       if (perp >= 20) continue;
       if (t < bestD) { best = e; bestD = t; bestT = t; }
     }
-    const ex = sx + dx * wallD, ey = sy + dy * wallD;
+    // Barrels block the beam too: nearest barrel in the corridor detonates.
+    let barrelHit: { x: number; y: number; hp: number } | null = null;
+    let barrelT = Infinity;
+    for (const b of this.barrels) {
+      if (b.hp <= 0) continue;
+      const rx = b.x - sx, ry = b.y - sy;
+      const t = rx * dx + ry * dy;
+      if (t < 0 || t > wallD) continue;
+      if (Math.abs(rx * dy - ry * dx) >= 18) continue;
+      if (t < barrelT) { barrelT = t; barrelHit = b; }
+    }
+    let ex = sx + dx * wallD, ey = sy + dy * wallD;
+    if (barrelHit && barrelT <= bestD) {
+      const before = barrelHit.hp;
+      this.damageBarrel(barrelHit, w.damage, p.id);
+      if (barrelHit.hp > 0 && before !== barrelHit.hp) this.burst(barrelHit.x, barrelHit.y, 3, '#f87171', 180);
+      ex = sx + dx * barrelT; ey = sy + dy * barrelT;
+      best = null;
+    } else if (best) {
+      // Headshot x2: beam strike within top 25% of victim (head = top 17px of 68px body).
+      this.hurt(best, w.damage, dx * w.knockback, -220, p.id, p.weapon, sy + dy * bestT < best.y - 51);
+      ex = sx + dx * bestD; ey = sy + dy * bestD;
+    }
     const color = '#fef08a';
     this.beams.push({ x1: sx, y1: sy, x2: ex, y2: ey, t: 0.18, color });
     this.burst(ex, ey, 8, color, 260);
-    // Headshot x2: beam strike within top 25% of victim (head = top 17px of 68px body).
-    if (best) this.hurt(best, w.damage, dx * w.knockback, -220, p.id, p.weapon, sy + dy * bestT < best.y - 51);
     if (!isInfinite(p.weapon) && p.ammo > 0) p.ammo--;
     if (!isInfinite(p.weapon) && p.ammo === 0) { p.weapon = 'fists'; p.ammo = -1; }
     p.cd = w.fireInterval;
@@ -554,6 +586,17 @@ export class LocalMode {
           // Walls block melee: no spear/sword/fist hits through a pillar.
           if (this.segmentBlocked(sx, sy, e.x, e.y - 34, solids)) continue;
           this.hurt(e, w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon, sy < e.y - 51);
+        }
+      }
+      for (const b of this.barrels) {
+        if (b.hp <= 0) continue;
+        const dx = b.x - sx, dy = b.y - sy, d = Math.hypot(dx, dy);
+        let da = Math.abs(Math.atan2(dy, dx) - aim); if (da > Math.PI) da = 2 * Math.PI - da;
+        if (d < w.melee.range + 20 && da < w.melee.arc / 2 + 0.35) {
+          if (this.segmentBlocked(sx, sy, b.x, b.y, solids)) continue;
+          const before = b.hp;
+          this.damageBarrel(b, w.damage, p.id);
+          if (b.hp > 0 && before !== b.hp) this.burst(b.x, b.y, 3, '#f87171', 180);
         }
       };
       // Punch-boost: swinging fists airborne kicks the attacker (mobility).
@@ -727,6 +770,49 @@ export class LocalMode {
           }
         }
         if (!moved) break;
+      }
+      // Barrels (center-anchored circle r15 ~= 22x30 box): gravity + rest on
+      // platforms / crates so Showdown barrels drop onto their perches.
+      for (const b of this.barrels) {
+        if (b.hp <= 0) continue;
+        b.vy = Math.min(1400, (b.vy ?? 0) + GRAVITY * dt);
+        b.x += (b.vx ?? 0) * dt;
+        b.vx = (b.vx ?? 0) * (1 - Math.min(1, 3 * dt));
+        if (Math.abs(b.vx ?? 0) < 4) b.vx = 0;
+        if (b.x < 12) { b.x = 12; b.vx = 0; }
+        if (b.x > W - 12) { b.x = W - 12; b.vx = 0; }
+        b.y += (b.vy ?? 0) * dt;
+        const box = (): { x: number; y: number; w: number; h: number } =>
+          ({ x: b.x - 11, y: b.y - 15, w: 22, h: 30 });
+        for (const s of statics) {
+          if (!overlaps(box(), s)) continue;
+          const cur = box();
+          if ((b.vy ?? 0) >= 0 && cur.y < s.y && cur.y + cur.h - s.y < 30) {
+            b.y = s.y - 15;
+            b.vy = 0;
+          } else {
+            const ox = Math.min(cur.x + cur.w, s.x + s.w) - Math.max(cur.x, s.x);
+            const oy = Math.min(cur.y + cur.h, s.y + s.h) - Math.max(cur.y, s.y);
+            if (ox < oy) {
+              if (cur.x + cur.w / 2 < s.x + s.w / 2) b.x = s.x - 11;
+              else b.x = s.x + s.w + 11;
+              b.vx = 0;
+            } else if (cur.y + cur.h / 2 < s.y + s.h / 2) {
+              b.y = s.y - 15;
+              b.vy = 0;
+            } else {
+              b.y = s.y + s.h + 15;
+              if ((b.vy ?? 0) < 0) b.vy = 0;
+            }
+          }
+        }
+        for (const cr of this.crates) {
+          if (!overlaps(box(), cr)) continue;
+          if ((b.vy ?? 0) >= 0 && b.y < cr.y) {
+            b.y = cr.y - 15;
+            b.vy = 0;
+          }
+        }
       }
     }
     this.dropT -= dt;
@@ -906,6 +992,18 @@ export class LocalMode {
         else this.burst(pr.x, pr.y, 4, '#fde047', 200);
         pr.life = 0; continue;
       }
+      for (const b of this.barrels) {
+        if (b.hp <= 0 || pr.life <= 0 || Math.abs(pr.x - b.x) >= 16 || Math.abs(pr.y - b.y) >= 22) continue;
+        // Weak chip (flamethrower/ice/glue/minigun) still fuses in ~2 hits.
+        const chip = pr.kind === 'thrown' ? THROW_DAMAGE : Math.max(25, pr.dmg);
+        const before = b.hp;
+        this.damageBarrel(b, chip, pr.owner);
+        if (b.hp > 0 && before !== b.hp) this.burst(pr.x, pr.y, 3, '#f87171', 180);
+        // RPG/grenade rockets blow up on contact AND fuse the barrel.
+        if (pr.explosive) this.explode(pr.x, pr.y, pr.explosive, pr.dmg, pr.owner);
+        pr.life = 0;
+        break;
+      }
       for (const e of this.players) {
         if (!e.alive || e.id === pr.owner || pr.life <= 0) continue;
         if (Math.abs(pr.x - e.x) >= 14 || pr.y <= e.y - 70 || pr.y >= e.y) continue;
@@ -919,13 +1017,6 @@ export class LocalMode {
           else if (pr.kind === 'glue') { e.glueT = Math.min(3, e.glueT + 1); this.burst(pr.x, pr.y, 6, '#d6a85c', 160); }
         }
         pr.life = 0; break;
-      }
-      for (const b of this.barrels) {
-        if (b.hp <= 0 || pr.life <= 0 || Math.abs(pr.x - b.x) >= 16 || Math.abs(pr.y - b.y) >= 22) continue;
-        b.hp -= pr.dmg; pr.life = 0;
-        if (b.hp <= 0) this.fuses.push({ x: b.x, y: b.y, t: 0.1, r: 150, dmg: 55, owner: pr.owner });
-        else this.burst(pr.x, pr.y, 3, '#f87171', 180);
-        break;
       }
     }
     this.projs = this.projs.filter((p) => p.life > 0);

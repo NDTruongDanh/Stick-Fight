@@ -60,6 +60,14 @@ const WIN_SCORE = 5;
 const DROP_INTERVAL = 4;
 const MAX_DROPS = 6;
 const THROW_DAMAGE = 55;
+// Explosive barrels (top-left anchored, 22x30). One pistol-class hit + one
+// weak hit detonates (HP 30, min 25 chip); thrown guns one-shot.
+const BARREL_W = 22;
+const BARREL_H = 30;
+const BARREL_HP = 30;
+const BARREL_CHIP = 25;
+const BARREL_BLAST_R = 135;
+const BARREL_BLAST_DMG = 85;
 
 interface GunDef {
   damage: number;
@@ -322,6 +330,7 @@ export class Match {
 
     this.stepProjectiles(dt);
     this.stepCrates(dt);
+    this.stepBarrels(dt);
     this.stepDrops(dt);
     this.checkRound(dt);
   }
@@ -343,7 +352,7 @@ export class Match {
       vx: 0, vy: 0, angle: 0,
     }));
     this.barrels = (this.level.barrels ?? []).map((b) => ({
-      x: b.x * WORLD_W, y: b.y * WORLD_H, hp: 50,
+      x: b.x * WORLD_W, y: b.y * WORLD_H, hp: BARREL_HP, vx: 0, vy: 0,
     }));
     for (const p of this.players) {
       p.hp = PLAYER_HP;
@@ -695,6 +704,19 @@ export class Match {
         if (this.segmentBlocked(cx, cy, q.x, q.y + PH / 2, solids)) continue;
         this.damage(q, def.damage, p.id, dx * def.knockback, -260, p.weapon, p.y + PH / 2 < q.y + PH * 0.25);
       }
+      // Melee also cracks explosive barrels (same arc, walls block).
+      for (let i = this.barrels.length - 1; i >= 0; i--) {
+        const b = this.barrels[i];
+        const c = this.barrelCenter(b);
+        const ddx = c.x - cx, ddy = c.y - cy;
+        if (Math.hypot(ddx, ddy) > def.melee.range + 20) continue;
+        let da = Math.atan2(ddy, ddx) - aimAng;
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        if (Math.abs(da) > def.melee.arc / 2 + 0.25) continue;
+        if (this.segmentBlocked(cx, cy, c.x, c.y, solids)) continue;
+        this.damageBarrel(i, def.damage, p.id);
+      }
       // Punch-boost: airborne fists swing kicks the attacker (mobility).
       if (p.weapon === "fists" && !p.onGround) {
         p.vx += dx * 240;
@@ -782,9 +804,26 @@ export class Match {
       hits.push({ q, t });
     }
     hits.sort((a, b) => a.t - b.t);
-    const targets = hits.slice(0, 1);
-    for (const h of targets) this.damage(h.q, def.damage, p.id, dx * def.knockback, -220, p.weapon, sy + dy * h.t < h.q.y + PH * 0.25);
-    const endD = targets.length ? targets[0].t : wallD;
+    // Barrels block the beam too: nearest barrel inside the corridor detonates.
+    let barrelIdx = -1, barrelT = Infinity;
+    for (let i = 0; i < this.barrels.length; i++) {
+      const c = this.barrelCenter(this.barrels[i]);
+      const rx = c.x - sx, ry = c.y - sy;
+      const t = rx * dx + ry * dy;
+      if (t < 0 || t > wallD) continue;
+      if (Math.abs(rx * dy - ry * dx) >= 18) continue;
+      if (t < barrelT) { barrelT = t; barrelIdx = i; }
+    }
+    const playerT = hits.length ? hits[0].t : Infinity;
+    let endD = wallD;
+    if (barrelIdx >= 0 && barrelT <= playerT) {
+      this.damageBarrel(barrelIdx, def.damage, p.id);
+      endD = barrelT;
+    } else {
+      const targets = hits.slice(0, 1);
+      for (const h of targets) this.damage(h.q, def.damage, p.id, dx * def.knockback, -220, p.weapon, sy + dy * h.t < h.q.y + PH * 0.25);
+      endD = targets.length ? targets[0].t : wallD;
+    }
     // Short tracer so remote clients see the beam (zero damage: skipped by hit code).
     this.projectiles.push({
       id: this.nextProjId++, kind: p.weapon,
@@ -863,8 +902,23 @@ export class Match {
     }
   }
 
+  private barrelCenter(b: BarrelState): { x: number; y: number } {
+    return { x: b.x + BARREL_W / 2, y: b.y + BARREL_H / 2 };
+  }
+
+  /** Damage a barrel by index; detonates (removes + explodes) at 0 hp. */
+  private damageBarrel(index: number, dmg: number, owner: number): void {
+    const b = this.barrels[index];
+    if (!b) return;
+    b.hp -= dmg;
+    if (b.hp > 0) return;
+    const c = this.barrelCenter(b);
+    this.barrels.splice(index, 1);
+    this.explode(c.x, c.y, BARREL_BLAST_R, BARREL_BLAST_DMG, owner);
+  }
+
   private explode(x: number, y: number, radius: number, dmg: number, owner: number): void {
-    this.events.push({ kind: "explode", a: owner });
+    this.events.push({ kind: "explode", a: owner, x, y });
     const solids = this.solids();
     for (const q of this.players) {
       if (!q.alive) continue;
@@ -880,6 +934,18 @@ export class Match {
       const dealt = q.id === owner ? Math.min(dmg * fall, 50) : dmg * fall;
       this.damage(q, dealt, owner, Math.cos(a) * 620, Math.sin(a) * 620 - 200, "explosion");
     }
+    // Chain-detonate barrels caught in the blast (walls block the fuse).
+    // Collect first so splice-then-explode recursion terminates.
+    const chained: { x: number; y: number }[] = [];
+    for (let i = this.barrels.length - 1; i >= 0; i--) {
+      const b = this.barrels[i];
+      const c = this.barrelCenter(b);
+      if (Math.hypot(c.x - x, c.y - y) > radius + 15) continue;
+      if (this.segmentBlocked(x, y, c.x, c.y, solids)) continue;
+      this.barrels.splice(i, 1);
+      chained.push(c);
+    }
+    for (const c of chained) this.explode(c.x, c.y, BARREL_BLAST_R, BARREL_BLAST_DMG, owner);
   }
 
   private steerSnake(pr: Proj, dt: number): void {
@@ -927,16 +993,16 @@ export class Match {
           break;
         }
       }
-      // barrels
+      // barrels (center-based AABB so hits match the drawn 22x30 rect;
+      // tracers carry 0 damage and never fuse barrels — sniper uses fireBeam).
       for (let i = this.barrels.length - 1; i >= 0; i--) {
         const b = this.barrels[i];
-        if (Math.abs(pr.x - b.x) < 22 && Math.abs(pr.y - b.y) < 30) {
-          b.hp -= pr.thrown ? 55 : 25;
+        if (pr.damage <= 0 && !pr.thrown) continue;
+        const c = this.barrelCenter(b);
+        if (Math.abs(pr.x - c.x) < BARREL_W / 2 + 5 && Math.abs(pr.y - c.y) < BARREL_H / 2 + 5) {
+          const chip = pr.thrown ? THROW_DAMAGE : Math.max(BARREL_CHIP, pr.damage);
           dead = true;
-          if (b.hp <= 0) {
-            this.barrels.splice(i, 1);
-            this.explode(b.x, b.y, 135, 85, pr.owner);
-          }
+          this.damageBarrel(i, chip, pr.owner);
           break;
         }
       }
@@ -1127,6 +1193,60 @@ export class Match {
     for (const c of this.crates) {
       if (c.x < 0) { c.x = 0; c.vx = 0; }
       if (c.x + c.w > WORLD_W) { c.x = WORLD_W - c.w; c.vx = 0; }
+    }
+  }
+
+  private stepBarrels(dt: number): void {
+    // Barrels fall and rest on platforms / movers / crates (top-left anchored
+    // 22x30). Without this the Showdown barrels hover where the level file
+    // spawns them (~27px above their perch).
+    const statics = this.solids(false);
+    const overlaps = (
+      a: { x: number; y: number; w: number; h: number },
+      b: { x: number; y: number; w: number; h: number },
+    ): boolean =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    for (const b of this.barrels) {
+      b.vy = Math.min(MAX_FALL, (b.vy ?? 0) + GRAVITY * dt);
+      b.x += (b.vx ?? 0) * dt;
+      b.vx = (b.vx ?? 0) * (1 - Math.min(1, 3 * dt));
+      if (Math.abs(b.vx ?? 0) < 4) b.vx = 0;
+      if (b.x < 0) { b.x = 0; b.vx = 0; }
+      if (b.x + BARREL_W > WORLD_W) { b.x = WORLD_W - BARREL_W; b.vx = 0; }
+      b.y += (b.vy ?? 0) * dt;
+      const box = (): { x: number; y: number; w: number; h: number } =>
+        ({ x: b.x, y: b.y, w: BARREL_W, h: BARREL_H });
+      for (const s of statics) {
+        if (!overlaps(box(), s)) continue;
+        if ((b.vy ?? 0) >= 0 && b.y < s.y && b.y + BARREL_H - s.y < 24) {
+          b.y = s.y - BARREL_H;
+          b.vy = 0;
+        } else {
+          const cur = box();
+          const ox = Math.min(cur.x + cur.w, s.x + s.w) - Math.max(cur.x, s.x);
+          const oy = Math.min(cur.y + cur.h, s.y + s.h) - Math.max(cur.y, s.y);
+          if (ox < oy) {
+            if (cur.x + cur.w / 2 < s.x + s.w / 2) b.x = s.x - BARREL_W;
+            else b.x = s.x + s.w;
+            b.vx = 0;
+          } else if (cur.y + cur.h / 2 < s.y + s.h / 2) {
+            b.y = s.y - BARREL_H;
+            b.vy = 0;
+          } else {
+            b.y = s.y + s.h;
+            if ((b.vy ?? 0) < 0) b.vy = 0;
+          }
+        }
+      }
+      // Rest on crates (barrel never pushes the crate down).
+      for (const cr of this.crates) {
+        if (!overlaps(box(), cr)) continue;
+        if ((b.vy ?? 0) >= 0 && b.y + BARREL_H / 2 < cr.y + cr.h / 2) {
+          b.y = cr.y - BARREL_H;
+          b.vy = 0;
+        }
+      }
+      if (b.y > WORLD_H + 200) { b.y = -40; b.vy = 0; }
     }
   }
 

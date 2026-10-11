@@ -34,7 +34,7 @@ export type ClientMsg =
   | { v: number; t: 'ping'; t0: number };
 
 export interface SnapshotPlayer extends PlayerState {}
-export interface SnapshotEvent { kind: string; text?: string; a?: number; b?: number }
+export interface SnapshotEvent { kind: string; text?: string; a?: number; b?: number; x?: number; y?: number }
 
 export interface RosterEntry {
   id: number;

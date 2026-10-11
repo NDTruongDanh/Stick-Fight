@@ -488,7 +488,8 @@ export class OnlineMode {
         this.shake = Math.max(this.shake, 0.3);
       } else if (e.kind === "explode") {
         const at = s.players.find((p) => p.id === e.a);
-        const ex = at?.x ?? WORLD_W / 2, ey = at ? at.y + PH / 2 : WORLD_H / 2;
+        const ex = e.x ?? at?.x ?? WORLD_W / 2;
+        const ey = e.y ?? (at ? at.y + PH / 2 : WORLD_H / 2);
         this.burst(ex, ey, 30, "#fb923c");
         this.burst(ex, ey, 16, "#525252");
         this.shake = Math.max(this.shake, 0.5);

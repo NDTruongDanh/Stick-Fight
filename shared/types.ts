@@ -65,5 +65,5 @@ export interface ProjectileState {
 }
 
 export interface CrateState { x: number; y: number; w: number; h: number; vx: number; vy: number; angle: number }
-export interface BarrelState { x: number; y: number; hp: number }
+export interface BarrelState { x: number; y: number; hp: number; vx?: number; vy?: number }
 export interface DroppedGun { x: number; y: number; vx: number; vy: number; weapon: WeaponId; ammo: number }
