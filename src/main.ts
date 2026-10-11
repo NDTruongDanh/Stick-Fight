@@ -125,6 +125,11 @@ function showJoinSetup(): void {
 /** Map low-level NetClient connect failures to actionable toasts. */
 function connectErrorToast(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err ?? '');
+  if (/no LAN server/i.test(raw)) return 'No LAN server found — is `npm run host` running on this network?';
+  if (/served over https|mixed content|https.*http/i.test(raw)) {
+    return 'Cannot auto-find server over HTTPS — open the http:// address or enter it manually';
+  }
+  if (/scan cancelled|cancelled/i.test(raw)) return 'Scan cancelled';
   if (/room full/i.test(raw)) return 'Room is full (max 4 players) — try another room';
   if (/room not found|bad room code|bad code/i.test(raw)) return 'Room not found — check the 4-letter code';
   if (/server full|max rooms/i.test(raw)) return 'Server is full (max rooms) — try again later';

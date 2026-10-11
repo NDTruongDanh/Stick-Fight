@@ -31,12 +31,20 @@ Anyone can then host a match from their own browser:
 
 1. Click **HOST** → pick a name, arena, wins, bots (optional custom map
    upload) → **CREATE ROOM**. You get a short 4-letter room code.
-2. Friends click **JOIN** → enter the same server address
-   (`ws://<server-ip>:8080`) + the room code → **JOIN ROOM**.
+2. Friends click **JOIN** → enter a fighter name + the 4-letter room code →
+   **JOIN ROOM**. No server address needed — the client finds the LAN
+   room server(s) itself, then joins with the code.
 
-Everyone must be on the same network. Each room is an independent match
+Everyone must be on the same network (same Wi-Fi / SSID — the server's LAN
+IP changes with DHCP, so the client re-discovers it fresh every time;
+nothing is remembered). Each room is an independent match
 (max 4 fighters). The room host can **DELETE ROOM** (everyone is kicked
 out); if the host quits/disconnects the room is auto-deleted.
+
+Advanced fallback: the JOIN screen has a collapsed "manual server address"
+field (`ws://<server-ip>:8080`) for networks where auto-discovery is
+blocked (e.g. the page was opened over `https://`, or AP isolation blocks
+the scan).
 
 Fast restart without rebuilding the client:
 
@@ -82,8 +90,8 @@ npm run docker:host
 ```
 
 Friends open `http://<server-ip>:8080`, then HOST creates a room and
-shares the code, or JOIN with `ws://<server-ip>:8080` + the room code
-(the server address fields fill this in automatically).
+shares the code, or JOIN with just the code (auto-discovery finds the
+server; manual address is an advanced fallback).
 
 Firewall note: allow inbound TCP on `8080` (web UI + game server) on the
 server machine — Windows Defender Firewall (and any third-party firewall)
@@ -96,11 +104,13 @@ must allow it for the current network profile.
   `8080:8080`, so adjust the mapping for Docker).
 - **Friends can't connect**: confirm everyone is on the same network
   (same Wi-Fi / SSID, no guest isolation or client-AP isolation on the
-  router), the server address uses the server's LAN IP (not `localhost`), and the
-  firewall rules above are in place. `ping <server-ip>` is a quick check.
+  router), and the firewall rules above are in place. `ping <server-ip>` is
+  a quick check. JOIN auto-discovers `http://<server-ip>:8080` — no address
+  typing needed; use the manual address only if the scan reports no server.
 - **Room not found (bad code)**: the code is 4 letters, case-insensitive —
   re-check it with the host. If the host quit, the room was auto-deleted
-  and a new one must be created.
+  and a new one must be created. With several servers up, the client tries
+  each one until a server accepts the code.
 
 ## Controls
 

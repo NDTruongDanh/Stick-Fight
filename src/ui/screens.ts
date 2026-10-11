@@ -2,6 +2,7 @@ import { renderHud, type HudState } from './hud.js';
 import { LEVELS } from '../levels/levels.js';
 import type { LevelDef } from '../../shared/types.js';
 import { blankLevel, clearCustom, exportLevel, importLevel, loadCustom, saveCustom } from '../levels/editor.js';
+import { findServerForCode } from '../net/discover.js';
 
 export interface MenuHandlers {
   onLocal(n: number, bots: boolean): void;
@@ -323,6 +324,7 @@ export class Ui {
   private screen: HTMLElement;
   private toasts: HTMLElement;
   private hudRaf = 0;
+  private pendingScan: AbortController | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -335,6 +337,12 @@ export class Ui {
   clear(): void {
     cancelAnimationFrame(this.hudRaf);
     this.hudRaf = 0;
+    try {
+      this.pendingScan?.abort();
+    } catch {
+      /* ignore */
+    }
+    this.pendingScan = null;
     this.screen.innerHTML = '';
   }
 
@@ -491,17 +499,22 @@ export class Ui {
         <label class="text-sm text-neutral-300">Fighter name
           <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="PLAYER1" value="PLAYER1" />
         </label>
-        <label class="text-sm text-neutral-300">Room server address
-          <input id="s-server" class="${INPUT} mt-1 font-mono" value="ws://${esc(lanWsHint())}" />
-          <span class="block text-[11px] text-neutral-500 mt-1">same server the host used (ask the host for the address if this fails).</span>
-          <span id="s-server-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
-        </label>
         <label class="text-sm text-neutral-300">Room code
           <input id="s-code" class="${INPUT} mt-1 font-mono uppercase tracking-[0.3em] text-center !text-xl font-bold" maxlength="6" placeholder="AB12" autocomplete="off" spellcheck="false" />
-          <span class="block text-[11px] text-neutral-500 mt-1">4-letter code from the host (e.g. <span class="font-mono text-neutral-300">AB12</span>).</span>
+          <span class="block text-[11px] text-neutral-500 mt-1">4-letter code from the host (e.g. <span class="font-mono text-neutral-300">AB12</span>). Same Wi-Fi — the game finds the server itself.</span>
           <span id="s-code-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
         </label>
-        <button id="s-go" class="${BTN_YELLOW} mt-1">JOIN ROOM</button>
+        <div id="s-status" class="hidden rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300"></div>
+        <button id="s-go" class="${BTN_YELLOW} mt-1">🔍 JOIN ROOM</button>
+        <details class="rounded-md bg-neutral-800/60 border border-neutral-800 px-3 py-2">
+          <summary class="cursor-pointer text-[12px] text-neutral-400 hover:text-neutral-200 select-none">Advanced: manual server address</summary>
+          <div class="mt-2 flex flex-col gap-2">
+            <input id="s-server" class="${INPUT} font-mono" value="ws://${esc(lanWsHint())}" />
+            <span class="block text-[11px] text-neutral-500">same server the host used (ask the host for the address if auto-find fails).</span>
+            <span id="s-server-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
+            <button id="s-manual" class="${BTN_GHOST}">JOIN WITH ADDRESS</button>
+          </div>
+        </details>
         <button id="s-back" class="${BTN_GHOST}">BACK</button>
       </div>`);
     const name = this.screen.querySelector<HTMLInputElement>('#s-name');
@@ -509,11 +522,99 @@ export class Ui {
     const code = this.screen.querySelector<HTMLInputElement>('#s-code');
     const serverErr = this.screen.querySelector<HTMLElement>('#s-server-err');
     const codeErr = this.screen.querySelector<HTMLElement>('#s-code-err');
+    const status = this.screen.querySelector<HTMLElement>('#s-status');
+    const goBtn = this.screen.querySelector<HTMLButtonElement>('#s-go');
+    const manualBtn = this.screen.querySelector<HTMLButtonElement>('#s-manual');
+    const backBtn = this.screen.querySelector<HTMLButtonElement>('#s-back');
     name?.select();
     code?.addEventListener('input', () => {
       if (code.value) code.value = code.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
     });
-    const go = () => {
+    let ctrl: AbortController | null = null;
+    const setStatus = (msg: string, kind: 'info' | 'error' | 'ok' = 'info'): void => {
+      if (!status || !status.isConnected) return;
+      status.classList.remove('hidden');
+      status.textContent = msg;
+      status.className =
+        kind === 'error'
+          ? 'rounded-md bg-neutral-800 border border-red-500/60 px-3 py-2 text-[12px] text-red-200'
+          : kind === 'ok'
+            ? 'rounded-md bg-neutral-800 border border-green-500/60 px-3 py-2 text-[12px] text-green-200'
+            : 'rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300';
+    };
+    const clearStatus = (): void => {
+      if (!status) return;
+      status.classList.add('hidden');
+      status.textContent = '';
+    };
+    const setBusy = (busy: boolean): void => {
+      if (goBtn) {
+        goBtn.disabled = busy;
+        goBtn.textContent = busy ? 'SCANNING LAN…' : '🔍 JOIN ROOM';
+        goBtn.classList.toggle('opacity-60', busy);
+      }
+      if (manualBtn) {
+        manualBtn.disabled = busy;
+        manualBtn.classList.toggle('opacity-60', busy);
+      }
+    };
+    const failCode = (msg: string): void => {
+      if (codeErr) {
+        codeErr.textContent = msg;
+        codeErr.classList.remove('hidden');
+      }
+      this.toast(msg);
+      code?.focus();
+    };
+    const goAuto = (): void => {
+      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      const roomCode = normalizeRoomCode(code?.value || '');
+      if (!roomCode) {
+        failCode('Enter the 4-letter room code from the host');
+        return;
+      }
+      if (codeErr) codeErr.classList.add('hidden');
+      if (serverErr) serverErr.classList.add('hidden');
+      // Abort any in-flight scan before starting a new one.
+      try {
+        ctrl?.abort();
+      } catch {
+        /* ignore */
+      }
+      ctrl = new AbortController();
+      this.pendingScan = ctrl;
+      const my = ctrl;
+      setBusy(true);
+      setStatus('Scanning LAN…');
+      void findServerForCode(roomCode, rawName, {
+        timeoutMs: 800,
+        concurrency: 64,
+        signal: my.signal,
+        onProgress: (done, total) => {
+          if (my.signal.aborted) return;
+          setStatus(`Scanning LAN… ${done}/${total}`);
+        },
+        onStage: (msg) => {
+          if (my.signal.aborted) return;
+          setStatus(msg);
+        },
+      })
+        .then((found) => {
+          if (my.signal.aborted) return;
+          if (this.pendingScan === my) this.pendingScan = null;
+          setStatus(`Found ${found.ip}:${found.port}, joining…`, 'ok');
+          cb({ name: rawName, serverUrl: found.wsUrl, code: roomCode });
+        })
+        .catch((err: unknown) => {
+          if (my.signal.aborted) return;
+          if (this.pendingScan === my) this.pendingScan = null;
+          setBusy(false);
+          const msg = err instanceof Error ? err.message : String(err ?? 'Could not connect');
+          setStatus(msg.slice(0, 160), 'error');
+          this.toast(msg.slice(0, 90));
+        });
+    };
+    const goManual = (): void => {
       const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
       const url = normalizeWsUrl(server?.value || '');
       if (!url) {
@@ -527,19 +628,33 @@ export class Ui {
       }
       const roomCode = normalizeRoomCode(code?.value || '');
       if (!roomCode) {
-        if (codeErr) {
-          codeErr.textContent = 'Enter the 4-letter room code from the host';
-          codeErr.classList.remove('hidden');
-        }
-        this.toast('Enter the 4-letter room code from the host');
-        code?.focus();
+        failCode('Enter the 4-letter room code from the host');
         return;
       }
+      try {
+        ctrl?.abort();
+      } catch {
+        /* ignore */
+      }
+      if (this.pendingScan === ctrl) this.pendingScan = null;
+      ctrl = null;
+      clearStatus();
       cb({ name: rawName, serverUrl: url, code: roomCode });
     };
-    (this.screen.querySelector('#s-go') as HTMLButtonElement).onclick = go;
-    (this.screen.querySelector('#s-back') as HTMLButtonElement).onclick = () =>
-      cb({ name: '', serverUrl: '', code: '', back: true });
+    if (goBtn) goBtn.onclick = goAuto;
+    if (manualBtn) manualBtn.onclick = goManual;
+    if (backBtn) {
+      backBtn.onclick = () => {
+        try {
+          ctrl?.abort();
+        } catch {
+          /* ignore */
+        }
+        if (this.pendingScan === ctrl) this.pendingScan = null;
+        ctrl = null;
+        cb({ name: '', serverUrl: '', code: '', back: true });
+      };
+    }
   }
 
   /** Legacy setup (local-only flows). Kept for compat; online uses create/join above. */

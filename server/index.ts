@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HostServer } from "./HostServer.js";
-import { DEFAULT_PORT, TICK_RATE } from "../shared/constants.js";
+import { DEFAULT_PORT, PROTOCOL_VERSION, TICK_RATE } from "../shared/constants.js";
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -104,11 +104,29 @@ if (!noStatic && !distExists) {
   );
 }
 
+const server = new HostServer(port, defaultLevel, defaultWins, defaultBots, tickHz);
+
 const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
   if (url.pathname === "/healthz") {
+    // Discovery probe: CORS-open so LAN clients can identify this server
+    // via fetch() (no sensitive data — game id, wire proto, room count).
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Max-Age", "86400");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    let rooms = 0;
+    try {
+      rooms = server.roomCount;
+    } catch {
+      rooms = 0;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, port }));
+    res.end(JSON.stringify({ ok: true, port, game: "stickfight", proto: PROTOCOL_VERSION, rooms }));
     return;
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -160,7 +178,6 @@ const httpServer = http.createServer((req, res) => {
   res.end("not found");
 });
 
-const server = new HostServer(port, defaultLevel, defaultWins, defaultBots, tickHz);
 // Attach WS to the same HTTP server: one port serves the web UI + game WS.
 server.start(httpServer);
 
