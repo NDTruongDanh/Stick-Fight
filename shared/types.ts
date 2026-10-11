@@ -35,7 +35,7 @@ export interface LevelDef {
 export type WeaponId =
   | 'fists' | 'pistol' | 'revolver' | 'deagle' | 'uzi' | 'ak47' | 'm16'
   | 'sniper' | 'shotgun' | 'sawedoff' | 'bouncer' | 'minigun'
-  | 'grenade' | 'rpg' | 'flamethrower' | 'sword' | 'spear' | 'laser'
+  | 'grenade' | 'rpg' | 'flamethrower' | 'sword' | 'spear'
   | 'snake' | 'snakeshot' | 'ice' | 'glue';
 
 export interface WeaponDef {

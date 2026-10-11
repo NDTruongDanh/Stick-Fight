@@ -25,7 +25,7 @@ const WEAPON_ICON: Record<string, string> = {
   fists: '👊', pistol: '🔫', revolver: '🔫', deagle: '🔫', uzi: '🔫',
   ak47: '🔫', m16: '🔫', sniper: '🎯', shotgun: '💥', sawedoff: '💥',
   bouncer: '🔮', minigun: '🔫', grenade: '💣', rpg: '🚀', flamethrower: '🔥',
-  sword: '🗡️', spear: '🔱', laser: '🔆', thrown: '🌀', boom: '💥', explosion: '💥',
+  sword: '🗡️', spear: '🔱', thrown: '🌀', boom: '💥', explosion: '💥',
   burn: '🔥', lava: '🌋', fell: '🕳', spikes: '🦔',
 };
 

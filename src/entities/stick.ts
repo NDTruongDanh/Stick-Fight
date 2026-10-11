@@ -35,8 +35,6 @@ function gunShape(weapon: WeaponId): { len: number; wid: number; color: string; 
     case 'uzi':
     case 'bouncer':
       return { len: 14, wid: 7, color: '#1c1917', blade: false };
-    case 'laser':
-      return { len: 20, wid: 6, color: '#0e7490', blade: false };
     case 'grenade':
     case 'flamethrower':
       return { len: 12, wid: 9, color: '#374151', blade: false };

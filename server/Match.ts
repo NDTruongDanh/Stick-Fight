@@ -110,7 +110,6 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
     flamethrower: { life: 0.32 },
     sword: {},
     spear: {},
-    laser: { life: 1.6 },
     snake: { life: 6 },
     snakeshot: { life: 6 },
     ice: { life: 1.2, gravity: 1200 },
@@ -143,7 +142,7 @@ function buildCanonicalWeapons(): Record<WeaponId, GunDef> {
 
 const DROP_CYCLE: WeaponId[] = [
   "pistol", "shotgun", "uzi", "ak47", "sniper", "revolver", "deagle",
-  "grenade", "rpg", "sword", "spear", "minigun", "laser", "bouncer",
+  "grenade", "rpg", "sword", "spear", "minigun", "bouncer",
   "sawedoff", "flamethrower", "m16", "ice", "glue", "snake", "snakeshot",
 ];
 const DROP_COMMON: WeaponId[] = DROP_CYCLE.filter((w) => w !== "snake" && w !== "snakeshot");
@@ -713,7 +712,7 @@ export class Match {
       return;
     }
     if (def.beam) {
-      // Sniper + laser are hitscan (no projectiles) — matches LocalMode.
+      // Sniper is hitscan (no projectiles) — matches LocalMode.
       if (p.ammo <= 0) {
         p.cooldown = 0.25;
         this.events.push({ kind: "dry", a: p.id });
@@ -771,9 +770,8 @@ export class Match {
     const def = WEAPONS[p.weapon];
     const sx = p.x, sy = p.y + PH / 2 - 6;
     const maxD = 2200;
-    // Laser burns through walls (original behavior); sniper is stopped by cover.
-    const laser = p.weapon === "laser";
-    const wallD = laser ? maxD : this.rayWallDist(sx, sy, dx, dy, maxD);
+    // Sniper is stopped by cover.
+    const wallD = this.rayWallDist(sx, sy, dx, dy, maxD);
     const hits: { q: PlayerState; t: number }[] = [];
     for (const q of this.players) {
       if (q.id === p.id || !q.alive) continue;
@@ -784,9 +782,9 @@ export class Match {
       hits.push({ q, t });
     }
     hits.sort((a, b) => a.t - b.t);
-    const targets = laser ? hits : hits.slice(0, 1);
+    const targets = hits.slice(0, 1);
     for (const h of targets) this.damage(h.q, def.damage, p.id, dx * def.knockback, -220, p.weapon, sy + dy * h.t < h.q.y + PH * 0.25);
-    const endD = laser ? wallD : (targets.length ? targets[0].t : wallD);
+    const endD = targets.length ? targets[0].t : wallD;
     // Short tracer so remote clients see the beam (zero damage: skipped by hit code).
     this.projectiles.push({
       id: this.nextProjId++, kind: p.weapon,

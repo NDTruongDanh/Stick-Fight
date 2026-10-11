@@ -58,7 +58,6 @@ export class Sfx {
         case 'flamethrower':
           this.noise(0.18, 0.35, 1400);
           break;
-        case 'laser':
         case 'bouncer':
           this.tone(1800, 300, 0.14, 'sawtooth', 0.4);
           break;

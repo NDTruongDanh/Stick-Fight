@@ -116,12 +116,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     knockback: 650, auto: false,
     melee: { range: 110, arc: 0.9, interval: 0.55 },
   }),
-  laser: d({
-    id: 'laser', name: 'Laser',
-    damage: 10, fireInterval: 0.35, magSize: 60,
-    projectileSpeed: 2000, spread: 0, recoil: 300,
-    knockback: 900, auto: true, beam: true,
-  }),
   snake: d({
     id: 'snake', name: 'Snake',
     damage: 5, fireInterval: 0.4, magSize: 6,

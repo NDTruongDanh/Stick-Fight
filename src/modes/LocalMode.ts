@@ -3,8 +3,8 @@
 // Inline arcade physics kept, but honors all level materials/hazards:
 // ice friction, bouncy, conveyor, blink, lava/spikes/laser kills,
 // movers/rotators, crates/barrels. Full weapon behaviors: grenade arc+
-// explosion, RPG rocket, bouncer bounce, minigun jetpack recoil, laser/
-// sniper beams, sword/spear melee arcs, shotgun pellets, flamethrower burn.
+// explosion, RPG rocket, bouncer bounce, minigun jetpack recoil, sniper
+// beam, sword/spear melee arcs, shotgun pellets, flamethrower burn.
 // Mechanics: punch-boost, recoil-fly, throw (F, 55 dmg, re-pickup reloads),
 // block (RMB, -65% damage).
 import { GRAVITY, MOVE_SPEED, JUMP_SPEED, MAX_FALL, WORLD_W as W, WORLD_H as H, PLAYER_COLORS, PLAYER_NAMES, PLAYER_HP, WIN_SCORE_DEFAULT } from '../../shared/constants.js';
@@ -16,8 +16,8 @@ import { Sfx } from '../core/audio.js';
 import { drawBackground, drawSnakes, drawFrostOverlay, drawGlueOverlay, drawIceGlue } from '../entities/props.js';
 import { drawStick } from '../entities/stick.js';
 
-// All 18 minus fists, plus rare snake guns (weighted rare in spawnDrop).
-const GUN_POOL: WeaponId[] = ['pistol', 'revolver', 'deagle', 'uzi', 'ak47', 'm16', 'sniper', 'shotgun', 'sawedoff', 'bouncer', 'minigun', 'grenade', 'rpg', 'flamethrower', 'sword', 'spear', 'laser', 'ice', 'glue', 'snake', 'snakeshot'];
+// All 19 minus fists, plus rare snake guns (weighted rare in spawnDrop).
+const GUN_POOL: WeaponId[] = ['pistol', 'revolver', 'deagle', 'uzi', 'ak47', 'm16', 'sniper', 'shotgun', 'sawedoff', 'bouncer', 'minigun', 'grenade', 'rpg', 'flamethrower', 'sword', 'spear', 'ice', 'glue', 'snake', 'snakeshot'];
 const RARE_SET: ReadonlySet<WeaponId> = new Set<WeaponId>(['snake', 'snakeshot']);
 const COMMON_POOL: WeaponId[] = GUN_POOL.filter((w) => !RARE_SET.has(w));
 const RARE_POOL: WeaponId[] = GUN_POOL.filter((w) => RARE_SET.has(w));
@@ -31,7 +31,7 @@ const TUNE: Record<WeaponId, Tune> = {
   grenade: { fuse: 1.6, grav: 1, life: 3.2 },
   rpg: { grav: 0.12, life: 3 },
   flamethrower: { life: 0.32, grav: 0 },
-  sword: {}, spear: {}, laser: {},
+  sword: {}, spear: {},
   snake: { life: 6, grav: 0 },
   snakeshot: { life: 6, grav: 0 },
   ice: { life: 1.2, grav: 0.5 },
@@ -505,9 +505,8 @@ export class LocalMode {
     const sx = p.x, sy = p.y - 46;
     const dx = Math.cos(aim), dy = Math.sin(aim);
     const maxD = 2200;
-    // Laser burns through walls (original behavior); sniper is stopped by cover.
-    const wallD = p.weapon === 'laser' ? maxD : this.rayWallDist(sx, sy, dx, dy, maxD);
-    const laserHits: { e: R; t: number }[] = [];
+    // Sniper is stopped by cover.
+    const wallD = this.rayWallDist(sx, sy, dx, dy, maxD);
     let best: R | null = null, bestD = wallD, bestT = 0;
     for (const e of this.players) {
       if (e === p || !e.alive) continue;
@@ -516,16 +515,14 @@ export class LocalMode {
       if (t < 0 || t > bestD) continue;
       const perp = Math.abs(rx * dy - ry * dx);
       if (perp >= 20) continue;
-      if (p.weapon === 'laser') laserHits.push({ e, t });
-      else if (t < bestD) { best = e; bestD = t; bestT = t; }
+      if (t < bestD) { best = e; bestD = t; bestT = t; }
     }
     const ex = sx + dx * wallD, ey = sy + dy * wallD;
-    const color = p.weapon === 'laser' ? '#22d3ee' : '#fef08a';
+    const color = '#fef08a';
     this.beams.push({ x1: sx, y1: sy, x2: ex, y2: ey, t: 0.18, color });
     this.burst(ex, ey, 8, color, 260);
     // Headshot x2: beam strike within top 25% of victim (head = top 17px of 68px body).
     if (best) this.hurt(best, w.damage, dx * w.knockback, -220, p.id, p.weapon, sy + dy * bestT < best.y - 51);
-    else for (const h of laserHits) this.hurt(h.e, w.damage, dx * w.knockback, -220, p.id, p.weapon, sy + dy * h.t < h.e.y - 51);
     if (!isInfinite(p.weapon) && p.ammo > 0) p.ammo--;
     if (!isInfinite(p.weapon) && p.ammo === 0) { p.weapon = 'fists'; p.ammo = -1; }
     p.cd = w.fireInterval;
@@ -574,7 +571,7 @@ export class LocalMode {
       }
       return;
     }
-    if (w.beam) { // laser + sniper: hitscan beam
+    if (w.beam) { // sniper: hitscan beam
       if (!isInfinite(p.weapon) && p.ammo <= 0) { p.weapon = 'fists'; p.ammo = -1; return; }
       this.fireBeam(p, aim);
       return;

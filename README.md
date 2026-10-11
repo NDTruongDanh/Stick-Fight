@@ -155,10 +155,10 @@ Click **LEVEL EDITOR** on the menu to paste or edit level JSON, then
   spike-ball pendulum), Rooftop (side lifts + drop-catching roof), Chandelier
   (crate stack + barrels + side perches) — with crates, barrels,
   movers/rotators and lava/spike/laser kills
-- 20 weapons: fists, pistol, revolver, Desert Eagle, uzi, AK-47, M16, sniper
+- 19 weapons: fists, pistol, revolver, Desert Eagle, uzi, AK-47, M16, sniper
   (beam), shotgun, sawed-off, bouncer (bouncing shots), minigun (jetpack
   recoil), grenade (arc + explosion), RPG (rocket + big explosion),
-  flamethrower (burn), sword / spear (melee arcs), laser (beam), snake /
+  flamethrower (burn), sword / spear (melee arcs), snake /
   snakeshot (homing) — falling drops, weapon throwing (55 dmg, re-pickup
   reloads), punch-boost, recoil-fly, block (−65% damage)
 - Match config on the menu: local humans stepper, bots toggle, round-wins

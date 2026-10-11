@@ -498,7 +498,7 @@ export class OnlineMode {
         if (from) {
           const l = Math.hypot(from.aimX, from.aimY);
           const dx = l > 1 ? from.aimX / l : from.facing, dy = l > 1 ? from.aimY / l : 0;
-          const color = e.text === "laser" ? "#22d3ee" : "#fef08a";
+          const color = "#fef08a";
           this.beams.push({
             x1: from.x, y1: from.y + PH / 2 - 6,
             x2: from.x + dx * 220, y2: from.y + PH / 2 - 6 + dy * 220,
@@ -506,7 +506,7 @@ export class OnlineMode {
           });
           if (this.beams.length > 12) this.beams.shift();
         }
-        try { this.sfx.shoot(String(e.text ?? "laser")); } catch { /* silent */ }
+        try { this.sfx.shoot(String(e.text ?? "sniper")); } catch { /* silent */ }
       } else if (e.kind === "throw") {
         try { this.sfx.throwWeapon(); } catch { /* silent */ }
       } else if (e.kind === "pickup") {
@@ -1051,12 +1051,7 @@ export class OnlineMode {
       ctx.beginPath();
       ctx.arc(pr.x, pr.y, 6, 0, Math.PI * 2);
       ctx.fill();
-    } else if (kind === "laser") {
-      ctx.fillStyle = "#22d3ee";
-      ctx.beginPath();
-      ctx.arc(pr.x, pr.y, 5, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (WEAPONS[pr.kind]?.explosive) {
+    } else if (WEAPONS[pr.kind as keyof typeof WEAPONS]?.explosive) {
       ctx.fillStyle = "#fb923c";
       ctx.beginPath();
       ctx.arc(pr.x, pr.y, 6, 0, Math.PI * 2);

@@ -4,7 +4,7 @@ import type { PlayerState, ProjectileState, WeaponId } from '../../shared/types.
 const SPEEDS: Partial<Record<WeaponId, number>> = {
   pistol: 950, revolver: 1100, deagle: 1250, uzi: 900, ak47: 1050,
   m16: 1100, sniper: 1900, shotgun: 850, sawedoff: 750, bouncer: 800,
-  minigun: 950, grenade: 620, rpg: 700, flamethrower: 520, laser: 1500,
+  minigun: 950, grenade: 620, rpg: 700, flamethrower: 520,
   spear: 900, sword: 0, fists: 0, snake: 260, snakeshot: 260,
   ice: 700, glue: 650,
 };
@@ -12,7 +12,7 @@ const SPEEDS: Partial<Record<WeaponId, number>> = {
 const DAMAGE: Partial<Record<WeaponId, number>> = {
   pistol: 12, revolver: 20, deagle: 34, uzi: 8, ak47: 12, m16: 11,
   sniper: 55, shotgun: 8, sawedoff: 9, bouncer: 14, minigun: 7,
-  grenade: 45, rpg: 60, flamethrower: 4, laser: 25, spear: 25,
+  grenade: 45, rpg: 60, flamethrower: 4, spear: 25,
   sword: 30, fists: 12, snake: 5, snakeshot: 5,
   ice: 8, glue: 5,
 };
@@ -20,7 +20,7 @@ const DAMAGE: Partial<Record<WeaponId, number>> = {
 const KNOCK: Partial<Record<WeaponId, number>> = {
   pistol: 220, revolver: 320, deagle: 480, uzi: 160, ak47: 220,
   m16: 220, sniper: 700, shotgun: 420, sawedoff: 520, bouncer: 300,
-  minigun: 140, grenade: 650, rpg: 750, flamethrower: 60, laser: 260,
+  minigun: 140, grenade: 650, rpg: 750, flamethrower: 60,
   spear: 380, sword: 420, fists: 320, snake: 200, snakeshot: 200,
   ice: 200, glue: 150,
 };
