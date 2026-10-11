@@ -115,6 +115,8 @@ export class OnlineMode {
   onRoomClosed: (reason: string) => void = () => {};
   /** Connection dropped mid-game (no auto-reconnect in room mode). */
   onDisconnect: (err: string | null) => void = () => {};
+  /** Host START rejected (not all ready) — surfaces as a toast in main.ts. */
+  onStartDenied: (reason: string) => void = () => {};
   private lastFrame = 0;
   private closed = false;
   private gameBooted = false;
@@ -170,6 +172,21 @@ export class OnlineMode {
   /** Host-only: delete the room (kicks everyone). */
   deleteRoom(): void {
     this.net.deleteRoom();
+  }
+
+  /** Lobby ready-up: mark this player ready (or not). */
+  setReady(ready: boolean): void {
+    this.net.sendReady(ready);
+  }
+
+  /** Host-only: request match start (server checks all-ready). */
+  requestStart(): void {
+    this.net.requestStart();
+  }
+
+  /** This client's ready flag from the latest roster (false until broadcast). */
+  get myReady(): boolean {
+    return this.roster.find((p) => p.id === this.net.clientId)?.ready ?? false;
   }
 
   private fireLobbyStart(): void {
@@ -268,6 +285,13 @@ export class OnlineMode {
     this.net.onMatchEnd = (wins) => {
       const best = Object.entries(wins).sort((a, b) => b[1] - a[1])[0];
       this.pushFeed(best ? `match won by #${best[0]} (${best[1]})` : "match over");
+    };
+    this.net.onStartDenied = (reason) => {
+      try {
+        this.onStartDenied(reason);
+      } catch {
+        /* ignore listener errors */
+      }
     };
 
     if (this.room.mode === "create") {
@@ -1209,7 +1233,7 @@ export class OnlineMode {
       ctx.fillStyle = "#fff";
       ctx.fillText(`lobby ${total}/4 · waiting for players…`, cw / 2, ch / 2 - 10);
       ctx.fillStyle = "#facc15";
-      ctx.fillText("match starts automatically", cw / 2, ch / 2 + 14);
+      ctx.fillText("host starts when everyone is ready", cw / 2, ch / 2 + 14);
       if (fatal) {
         ctx.fillStyle = "#f87171";
         ctx.font = "12px monospace";

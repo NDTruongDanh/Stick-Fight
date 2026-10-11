@@ -56,6 +56,8 @@ export class NetClient {
   onMatchEnd: (wins: Record<number, number>) => void = () => {};
   onRoomClosed: (reason: string, code: string) => void = () => {};
   onClose: () => void = () => {};
+  /** Host START rejected (not all ready, etc) — non-fatal, surfaces as a toast. */
+  onStartDenied: (reason: string) => void = () => {};
 
   private ws: WebSocket | null = null;
   private url = "";
@@ -179,6 +181,22 @@ export class NetClient {
     ws.send(JSON.stringify(msg));
   }
 
+  /** Lobby ready-up: toggle this player's ready flag (non-host). */
+  sendReady(ready: boolean): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const msg: ClientMsg = { v: PROTOCOL_VERSION, t: "ready", ready };
+    ws.send(JSON.stringify(msg));
+  }
+
+  /** Host-only: request match start (server validates all-ready). */
+  requestStart(): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const msg: ClientMsg = { v: PROTOCOL_VERSION, t: "startMatch" };
+    ws.send(JSON.stringify(msg));
+  }
+
   sendInput(in_: InputPayload): void {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -292,6 +310,13 @@ export class NetClient {
         this.levelId = msg.levelId;
         this.customLevel = msg.levelJson ?? null;
         this.onStart(msg);
+        break;
+      case "startDenied":
+        try {
+          this.onStartDenied(msg.reason);
+        } catch {
+          /* ignore listener errors */
+        }
         break;
       case "pong":
         this.pingMs = Date.now() - msg.t0;

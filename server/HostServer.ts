@@ -13,8 +13,12 @@ import type { LevelDef } from "../shared/types.js";
 // One server process hosts MANY independent rooms. Any client can create a
 // room (becoming its host); others join via a short room code. The host can
 // delete the room (everyone is kicked); if the host disconnects the room is
-// auto-deleted. Each room owns one authoritative Match with its own lobby
-// auto-start, roster, and snapshot stream.
+// auto-deleted. Each room owns one authoritative Match with its own manual
+// ready-up lobby, roster, and snapshot stream.
+//
+// Lobby flow: joiners wait in the menu lobby. Non-host players press READY;
+// the host presses START (only allowed when every non-host human is ready).
+// There is NO auto-start timer.
 //
 // This file REPLACES the old single-match HostServer (v1 hello/start flow).
 // ---------------------------------------------------------------------------
@@ -26,6 +30,7 @@ interface RoomClient {
   ws: WebSocket;
   input: MatchInput;
   joinedOk: boolean;
+  ready: boolean;
 }
 
 const send = (ws: WebSocket, msg: ServerMsg): void => {
@@ -89,7 +94,6 @@ class Room {
   clients = new Map<number, RoomClient>();
   match: Match;
   started = false;
-  startTimer: ReturnType<typeof setTimeout> | null = null;
   seed = (Math.random() * 2 ** 31) | 0;
   customJson: string | null = null;
   tickAcc = 0;
@@ -108,10 +112,7 @@ class Room {
   }
 
   destroy(): void {
-    if (this.startTimer) {
-      clearTimeout(this.startTimer);
-      this.startTimer = null;
-    }
+    // No timers in the manual ready-up lobby (previously auto-start).
   }
 
   firstFreeSlot(): number {
@@ -143,13 +144,19 @@ class Room {
 
   broadcastRoster(): void {
     const slots = new Map<number, number>();
-    for (const c of this.clients.values()) slots.set(c.id, c.slot);
+    const readyById = new Map<number, boolean>();
+    for (const c of this.clients.values()) {
+      slots.set(c.id, c.slot);
+      readyById.set(c.id, c.ready);
+    }
     const players = this.match.players.map((p, i) => ({
       id: p.id,
       name: p.name,
       slot: slots.get(p.id) ?? i,
       bot: !!p.isBot,
       color: p.color,
+      // Bots are always "ready" so they never block the host's START.
+      ready: p.isBot ? true : (readyById.get(p.id) ?? false),
     }));
     const msg = {
       v: PROTOCOL_VERSION,
@@ -161,28 +168,64 @@ class Room {
     for (const c of this.clients.values()) send(c.ws, msg);
   }
 
-  maybeAutoStart(startFn: () => void): void {
-    if (this.started || this.humans() < 2 || this.startTimer) return;
-    this.startTimer = setTimeout(() => {
-      this.startTimer = null;
-      if (!this.started && this.humans() >= 2) startFn();
-    }, 3000);
+  /** Non-host humans waiting in the lobby (the host's START never needs its own ready). */
+  waitingPlayers(): RoomClient[] {
+    return [...this.clients.values()].filter((c) => c.id !== this.hostId && c.joinedOk);
   }
 
-  cancelPendingStartIfLonely(): void {
-    if (!this.started && this.humans() < 2 && this.startTimer) {
-      clearTimeout(this.startTimer);
-      this.startTimer = null;
+  notReadyCount(): number {
+    let n = 0;
+    for (const c of this.waitingPlayers()) if (!c.ready) n++;
+    return n;
+  }
+
+  allReady(): boolean {
+    return this.notReadyCount() === 0;
+  }
+
+  canStart(): boolean {
+    return !this.started && this.humans() >= 1 && this.allReady();
+  }
+
+  setReady(clientId: number, ready: boolean): void {
+    const c = this.clients.get(clientId);
+    if (!c || c.ready === ready) return;
+    c.ready = ready;
+    this.broadcastRoster();
+  }
+
+  /**
+   * Host-only manual start. Returns normally on success; on failure sends a
+   * non-fatal startDenied to the requester (never a reject — reject kills
+   * the socket in NetClient).
+   */
+  tryStart(requesterId: number): void {
+    const req = this.clients.get(requesterId);
+    if (!req) return;
+    if (requesterId !== this.hostId) {
+      send(req.ws, { v: PROTOCOL_VERSION, t: "startDenied", reason: "only the host can start the match" } as ServerMsg);
+      return;
     }
+    if (this.started) return;
+    if (this.humans() < 1) {
+      send(req.ws, { v: PROTOCOL_VERSION, t: "startDenied", reason: "waiting for players to join" } as ServerMsg);
+      return;
+    }
+    const n = this.notReadyCount();
+    if (n > 0) {
+      send(req.ws, {
+        v: PROTOCOL_VERSION,
+        t: "startDenied",
+        reason: `waiting for ${n} player${n === 1 ? "" : "s"} to ready up`,
+      } as ServerMsg);
+      return;
+    }
+    this.startMatch();
   }
 
   startMatch(): void {
     if (this.started) return;
     this.started = true;
-    if (this.startTimer) {
-      clearTimeout(this.startTimer);
-      this.startTimer = null;
-    }
     const msg: ServerMsg = {
       v: PROTOCOL_VERSION,
       t: "start",
@@ -407,6 +450,22 @@ export class HostServer {
         case "joinRoom":
           this.handleJoin(ws, msg);
           break;
+        case "ready": {
+          const mem = this.sockRoom.get(ws);
+          if (!mem) break;
+          const room = this.rooms.get(mem.roomCode);
+          if (!room || room.started) break;
+          room.setReady(mem.clientId, !!msg.ready);
+          break;
+        }
+        case "startMatch": {
+          const mem = this.sockRoom.get(ws);
+          if (!mem) break;
+          const room = this.rooms.get(mem.roomCode);
+          if (!room) break;
+          room.tryStart(mem.clientId);
+          break;
+        }
         case "input": {
           const mem = this.sockRoom.get(ws);
           if (!mem) return;
@@ -496,7 +555,7 @@ export class HostServer {
 
     const room = new Room(code, id, level, { cycle, winsTarget, customJson });
     room.addInitialBots(botCount);
-    const info: RoomClient = { id, slot: 0, name, ws, input: emptyInput(), joinedOk: true };
+    const info: RoomClient = { id, slot: 0, name, ws, input: emptyInput(), joinedOk: true, ready: false };
     room.clients.set(id, info);
     // Host takes slot 0; Match color follows slot order.
     room.match.addPlayer(id, name);
@@ -510,7 +569,6 @@ export class HostServer {
       clientId: id, slot: 0, levelId: room.match.level.id, code, isHost: true,
     });
     room.broadcastRoster();
-    room.maybeAutoStart(() => room.startMatch());
   }
 
   private handleJoin(ws: WebSocket, msg: Extract<ClientMsg, { t: "joinRoom" }>): void {
@@ -540,7 +598,7 @@ export class HostServer {
     const id = this.nextId++;
     const name = String(msg.name || `P${id}`).slice(0, 16) || `P${id}`;
     const slot = room.firstFreeSlot();
-    const info: RoomClient = { id, slot, name, ws, input: emptyInput(), joinedOk: true };
+    const info: RoomClient = { id, slot, name, ws, input: emptyInput(), joinedOk: true, ready: false };
     room.clients.set(id, info);
     room.match.addPlayer(id, name);
     room.trimBots();
@@ -552,7 +610,6 @@ export class HostServer {
       clientId: id, slot, levelId: room.match.level.id, code, isHost: id === room.hostId,
     });
     room.broadcastRoster();
-    room.maybeAutoStart(() => room.startMatch());
     if (room.started) room.sendStartTo(ws);
   }
 
@@ -591,7 +648,6 @@ export class HostServer {
       // Host quit -> auto-delete: kick everyone else out.
       this.closeRoom(room, "host left — room closed");
     } else {
-      room.cancelPendingStartIfLonely();
       if (room.clients.size === 0) {
         room.destroy();
         this.rooms.delete(room.code);
@@ -647,7 +703,6 @@ export class HostServer {
       this.closeRoom(room, "host left — room closed");
       return;
     }
-    room.cancelPendingStartIfLonely();
     if (room.clients.size === 0) {
       room.destroy();
       this.rooms.delete(room.code);

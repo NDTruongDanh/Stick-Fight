@@ -113,6 +113,8 @@ export interface LobbyPlayer {
   isSelf?: boolean;
   /** True for the room host. */
   isHost?: boolean;
+  /** Ready-up flag (non-host humans; bots always true). */
+  ready?: boolean;
 }
 
 /**
@@ -169,15 +171,25 @@ export interface LobbyInfo {
   code?: string;
   addr?: string;
   players: LobbyPlayer[];
-  /** True when the local player is the room host (shows DELETE). */
+  /** True when the local player is the room host (shows START + DELETE). */
   isHost?: boolean;
   /** Optional footer line. Rendered as plain text. */
   hint?: string;
+  /** Local player's ready flag (non-host). */
+  myReady?: boolean;
+  /** True when the host may press START (all non-host humans ready). */
+  canStart?: boolean;
+  /** True when every non-host human is ready. */
+  allReady?: boolean;
+  /** Number of non-host humans still not ready. */
+  waitingCount?: number;
 }
 
 export interface LobbyHandlers {
   onLeave(): void;
   onDelete?(): void;
+  onToggleReady?(): void;
+  onStart?(): void;
 }
 
 export function esc(s: string): string {
@@ -308,15 +320,33 @@ function lobbyCountText(players: LobbyPlayer[]): string {
 function lobbyChipsHTML(players: LobbyPlayer[]): string {
   return players
     .map((p) => {
-      const badge = p.bot
+      const botBadge = p.bot
         ? `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-purple-700 text-purple-100">BOT</span>`
         : '';
-      const tags = `${p.isSelf ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-blue-700 text-blue-50">YOU</span>` : ''}${p.isHost ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-yellow-600 text-black font-bold">HOST</span>` : ''}`;
+      const readyBadge = !p.bot && !p.isHost
+        ? p.ready
+          ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-green-700 text-green-50 font-bold">✓ READY</span>`
+          : `<span class="text-[11px] px-1.5 py-0.5 rounded bg-neutral-700 text-neutral-300">○ NOT READY</span>`
+        : '';
+      const tags = `${p.isSelf ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-blue-700 text-blue-50">YOU</span>` : ''}${p.isHost ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-yellow-600 text-black font-bold">HOST</span>` : ''}${readyBadge}`;
       return `<div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-800 border ${p.isSelf ? 'border-blue-600' : 'border-neutral-700'}">
         <span class="w-4 h-4 rounded-full shrink-0" style="background:${p.color}"></span>
-        <span class="font-bold text-sm">${esc(p.name)}</span>${tags ? `<span class="flex gap-1">${tags}</span>` : ''}${badge}</div>`;
+        <span class="font-bold text-sm">${esc(p.name)}</span>${tags ? `<span class="flex gap-1">${tags}</span>` : ''}${botBadge}</div>`;
     })
     .join('');
+}
+
+/** Status line under the chips: ready progress for host, ready state for guests. */
+function lobbyStatusText(info: Pick<LobbyInfo, 'isHost' | 'players' | 'myReady' | 'allReady' | 'waitingCount'>): string {
+  const humans = info.players.filter((p) => !p.bot);
+  if (info.isHost) {
+    if (humans.length <= 1) return 'Share the code — waiting for players to join… (you can START solo anytime)';
+    const n = info.waitingCount ?? humans.filter((p) => !p.isHost && !p.ready).length;
+    if (n <= 0) return 'All players ready — press START MATCH!';
+    return `Waiting for ${n} player${n === 1 ? '' : 's'} to ready up…`;
+  }
+  if (info.myReady) return 'You are READY! Waiting for the host to start…';
+  return 'Press READY UP when you are ready to fight!';
 }
 
 export class Ui {
@@ -712,6 +742,8 @@ export class Ui {
   }
 
   showLobby(info: LobbyInfo, cb: LobbyHandlers): void {
+    const status = lobbyStatusText(info);
+    const startDisabled = info.isHost && !info.canStart ? 'disabled' : '';
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-1">${esc(info.title)}</h2>
       ${
         info.code
@@ -730,31 +762,68 @@ export class Ui {
           : ``
       }
       <p id="lobby-count" class="text-center text-[12px] text-neutral-400 mb-2">${esc(lobbyCountText(info.players))}</p>
-      <div id="lobby-players" class="flex flex-col gap-2 mb-4">${lobbyChipsHTML(info.players)}</div>
+      <div id="lobby-players" class="flex flex-col gap-2 mb-3">${lobbyChipsHTML(info.players)}</div>
+      <p id="lobby-status" class="text-center text-[13px] font-bold mb-3 ${info.isHost && info.canStart ? 'text-green-300' : 'text-yellow-200'}">${esc(status)}</p>
       ${
         info.hint
           ? `<p class="text-center text-[11px] text-neutral-500 mb-3">${esc(info.hint)}</p>`
           : ''
       }
       <div class="flex flex-col gap-2.5">
+        ${info.isHost
+          ? `<button id="l-start" class="${BTN_GREEN} !text-lg disabled:opacity-40 disabled:cursor-not-allowed" ${startDisabled}>▶ START MATCH</button>`
+          : `<button id="l-ready" class="${info.myReady ? BTN_YELLOW : BTN_GREEN} !text-lg">${info.myReady ? '✓ READY — TAP TO UNREADY' : 'READY UP'}</button>`}
         ${info.isHost ? `<button id="l-delete" class="${BTN_RED} !text-base">DELETE ROOM</button>` : ''}
         <button id="l-leave" class="${BTN_GHOST}">${info.isHost ? 'QUIT (DELETES ROOM)' : 'LEAVE'}</button>
       </div>`);
     (this.screen.querySelector('#l-leave') as HTMLButtonElement).onclick = () => cb.onLeave();
     const del = this.screen.querySelector<HTMLButtonElement>('#l-delete');
     if (del) del.onclick = () => cb.onDelete?.() ?? cb.onLeave();
+    const start = this.screen.querySelector<HTMLButtonElement>('#l-start');
+    if (start) start.onclick = () => cb.onStart?.();
+    const ready = this.screen.querySelector<HTMLButtonElement>('#l-ready');
+    if (ready) ready.onclick = () => cb.onToggleReady?.();
   }
 
   /**
-   * Live-update lobby chips + player count (e.g. from NetClient onRoster).
-   * No-op when no lobby is shown.
+   * Live-update lobby chips + player count + ready/start state
+   * (e.g. from NetClient onRoster). No-op when no lobby is shown.
    */
-  updateLobby(players: LobbyPlayer[]): void {
+  updateLobby(
+    players: LobbyPlayer[],
+    opts: { isHost?: boolean; myReady?: boolean; canStart?: boolean; allReady?: boolean; waitingCount?: number } = {},
+  ): void {
     const chips = this.screen.querySelector('#lobby-players');
     if (!chips && !this.screen.querySelector('#lobby-count')) return;
     if (chips) chips.innerHTML = lobbyChipsHTML(players);
     const count = this.screen.querySelector('#lobby-count');
     if (count) count.textContent = lobbyCountText(players);
+    const isHost = opts.isHost ?? !!this.screen.querySelector('#l-start');
+    const statusEl = this.screen.querySelector('#lobby-status');
+    if (statusEl) {
+      const text = lobbyStatusText({
+        isHost,
+        players,
+        myReady: opts.myReady,
+        allReady: opts.allReady,
+        waitingCount: opts.waitingCount,
+      });
+      statusEl.textContent = text;
+      const canStart = opts.canStart ?? false;
+      statusEl.className = `text-center text-[13px] font-bold mb-3 ${isHost && canStart ? 'text-green-300' : 'text-yellow-200'}`;
+    }
+    const start = this.screen.querySelector<HTMLButtonElement>('#l-start');
+    if (start && isHost) {
+      const can = opts.canStart ?? false;
+      start.disabled = !can;
+      start.textContent = can ? '▶ START MATCH' : '▶ START MATCH (WAITING…)';
+    }
+    const ready = this.screen.querySelector<HTMLButtonElement>('#l-ready');
+    if (ready && !isHost) {
+      const myReady = opts.myReady ?? false;
+      ready.textContent = myReady ? '✓ READY — TAP TO UNREADY' : 'READY UP';
+      ready.className = `${myReady ? BTN_YELLOW : BTN_GREEN} !text-lg`;
+    }
   }
 
   showHow(cb: { onBack(): void }): void {

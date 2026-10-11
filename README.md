@@ -1,4 +1,4 @@
-# Stick Fight: LAN Clone
+# Stick Fight
 
 A Stick Fight: The Game clone for LAN parties — TypeScript + Canvas + Tailwind,
 with local sofa multiplayer and online LAN multiplayer (authoritative server).
@@ -64,17 +64,17 @@ room is sent to the server with the room — joiners receive it automatically.
 npm run host -- --port 8080 --level woods1 --wins 5 --bots 1
 ```
 
-| Flag           | Default | Description                                    |
-| -------------- | ------- | ---------------------------------------------- |
-| `--port`       | `8080`  | Port serving the web UI + WS game server       |
-| `--level`      | `woods1`| Default starting arena for new rooms           |
-| `--wins`       | `5`     | Default round wins needed to take the match    |
-| `--bots`       | `0`     | Default prefilled bot fighters (clamped to max 4 total; `Match` still tops up to a minimum of 2 fighters) |
-| `--no-static`  | off     | Serve the WS game server only (no web UI)      |
-| `--static-dir` | `dist`  | Directory to serve the web UI from             |
+| Flag           | Default  | Description                                                                                               |
+| -------------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `--port`       | `8080`   | Port serving the web UI + WS game server                                                                  |
+| `--level`      | `woods1` | Default starting arena for new rooms                                                                      |
+| `--wins`       | `5`      | Default round wins needed to take the match                                                               |
+| `--bots`       | `0`      | Default prefilled bot fighters (clamped to max 4 total; `Match` still tops up to a minimum of 2 fighters) |
+| `--no-static`  | off      | Serve the WS game server only (no web UI)                                                                 |
+| `--static-dir` | `dist`   | Directory to serve the web UI from                                                                        |
 
 `--flag value` and `--flag=value` forms both work. `--level` / `--wins` /
-`--bots` are only room *defaults* — the creating client can override them
+`--bots` are only room _defaults_ — the creating client can override them
 per room. Extra bots are trimmed as humans join so humans + bots never
 exceed 4 fighters.
 
@@ -114,19 +114,19 @@ must allow it for the current network profile.
 
 ## Controls
 
-| Input        | Action                    |
-| ------------ | ------------------------- |
-| A / D        | Move (P2: ← / →)          |
-| W            | Jump (P2: ↑)              |
-| S            | Fall through platform     |
-| Mouse        | Aim (P1)                  |
-| Left click   | Fire weapon               |
-| Right click  | Block (reduces damage)    |
-| F            | Throw weapon              |
-| H            | Toggle help overlay       |
-| R            | Restart match             |
-| Esc          | Pause                     |
-| Q            | Quit to menu              |
+| Input       | Action                 |
+| ----------- | ---------------------- |
+| A / D       | Move (P2: ← / →)       |
+| W           | Jump (P2: ↑)           |
+| S           | Fall through platform  |
+| Mouse       | Aim (P1)               |
+| Left click  | Fire weapon            |
+| Right click | Block (reduces damage) |
+| F           | Throw weapon           |
+| H           | Toggle help overlay    |
+| R           | Restart match          |
+| Esc         | Pause                  |
+| Q           | Quit to menu           |
 
 P2 uses auto-aim at the nearest enemy. Extra local humans beyond 2 become bots.
 

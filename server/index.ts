@@ -193,7 +193,7 @@ httpServer.listen(port, () => {
   console.log("=== Stick Fight LAN room server ===");
   console.log(`room defaults: level ${defaultLevel} · first to ${defaultWins} · bots: ${defaultBots}`);
   console.log("flow: any player creates a room (HOST) -> shares the 4-letter code -> friends JOIN with the code");
-  console.log("lobby: match starts automatically ~3s after 2+ players join a room");
+  console.log("lobby: guests READY up, host STARTs manually once everyone is ready (no auto-start)");
   console.log("rooms: host DELETE kicks everyone · host quit auto-deletes the room");
   for (const { addr, internal } of lanIPs()) {
     console.log(`  http://${addr}:${port}${internal ? "  (this machine)" : "  <-- open this in a browser"}`);

@@ -143,9 +143,9 @@ function connectErrorToast(err: unknown): string {
 }
 
 // OnlineMode is lazy-loaded so the local game stays in its own chunk.
-// Room flow: create (host) or join (code) -> waiting lobby with room code ->
-// game HUD once the server starts the match. Host DELETE kicks everyone;
-// host quit auto-deletes the room.
+// Room flow: create (host) or join (code) -> ready-up lobby (READY for guests,
+// START for host once everyone is ready) -> game HUD once the host starts.
+// Host DELETE kicks everyone; host quit auto-deletes the room.
 async function startOnline(
   url: string,
   name: string,
@@ -171,22 +171,45 @@ async function startOnline(
       if (toast) ui.toast(toast);
       showMenu();
     };
-    type RosterEntry = { id: number; name: string; slot?: number; bot: boolean; color?: string };
-    // Recompute lobby view-model from the server roster: YOU + HOST badges.
-    const refreshLobby = (roster: RosterEntry[]): void => {
+    type RosterEntry = { id: number; name: string; slot?: number; bot: boolean; color?: string; ready?: boolean };
+    interface LobbyState {
+      players: { name: string; color: string; bot: boolean; id: number; slot?: number; isSelf: boolean; isHost: boolean; ready: boolean }[];
+      myReady: boolean;
+      allReady: boolean;
+      canStart: boolean;
+      waitingCount: number;
+    }
+    // Recompute lobby view-model from the server roster: YOU + HOST + READY badges,
+    // plus host START gating (all non-host humans ready).
+    const toLobbyState = (roster: RosterEntry[]): LobbyState => {
       const myId = m.myId;
       const hostId = m.hostId;
-      ui.updateLobby(
-        roster.map((p, i) => ({
-          name: p.name,
-          color: p.color ?? PLAYER_COLORS[(p.slot ?? i) % PLAYER_COLORS.length],
-          bot: !!p.bot,
-          id: p.id,
-          slot: p.slot,
-          isSelf: p.id === myId,
-          isHost: p.id === hostId,
-        })),
-      );
+      const players = roster.map((p, i) => ({
+        name: p.name,
+        color: p.color ?? PLAYER_COLORS[(p.slot ?? i) % PLAYER_COLORS.length],
+        bot: !!p.bot,
+        id: p.id,
+        slot: p.slot,
+        isSelf: p.id === myId,
+        isHost: p.id === hostId,
+        ready: p.bot ? true : !!p.ready,
+      }));
+      const myReady = roster.find((p) => p.id === myId)?.ready ?? false;
+      const waiting = roster.filter((p) => !p.bot && p.id !== hostId);
+      const waitingCount = waiting.filter((p) => !p.ready).length;
+      const allReady = waitingCount === 0;
+      const canStart = m.isHost && allReady;
+      return { players, myReady: !!myReady, allReady, canStart, waitingCount };
+    };
+    const refreshLobby = (roster: RosterEntry[]): void => {
+      const s = toLobbyState(roster);
+      ui.updateLobby(s.players, {
+        isHost: m.isHost,
+        myReady: s.myReady,
+        canStart: s.canStart,
+        allReady: s.allReady,
+        waitingCount: s.waitingCount,
+      });
     };
     const showGameHud = (): void => {
       const fallback: HudState = { players: [], round: 1, levelName: 'ONLINE' };
@@ -201,26 +224,21 @@ async function startOnline(
     };
     const showLobbyNow = (): void => {
       const roster = (m.lobbyRoster ?? []) as RosterEntry[];
-      const myId = m.myId;
-      const hostId = m.hostId;
+      const s = toLobbyState(roster);
       ui.showLobby(
         {
           title: m.isHost ? 'LOBBY — YOUR ROOM' : 'LOBBY — ONLINE',
           code: m.roomCode,
           addr: url,
-          players: roster.map((p, i) => ({
-            name: p.name,
-            color: p.color ?? PLAYER_COLORS[(p.slot ?? i) % PLAYER_COLORS.length],
-            bot: !!p.bot,
-            id: p.id,
-            slot: p.slot,
-            isSelf: p.id === myId,
-            isHost: p.id === hostId,
-          })),
+          players: s.players,
           isHost: m.isHost,
           hint: m.isHost
-            ? 'share the code above — match starts automatically once 2+ players have joined'
-            : 'match starts automatically once 2+ players have joined',
+            ? 'share the code above — press START MATCH when every player is ready'
+            : 'press READY UP above — the host starts once everyone is ready',
+          myReady: s.myReady,
+          canStart: s.canStart,
+          allReady: s.allReady,
+          waitingCount: s.waitingCount,
         },
         {
           onLeave: () => {
@@ -238,6 +256,21 @@ async function startOnline(
             ui.toast('Room deleted');
             // Server roomClosed + close will also fire — goMenu guards double nav.
           },
+          onToggleReady: () => {
+            try {
+              const cur = (m.lobbyRoster ?? []).find((p) => p.id === m.myId)?.ready ?? false;
+              m.setReady(!cur);
+            } catch {
+              /* socket closing */
+            }
+          },
+          onStart: () => {
+            try {
+              m.requestStart();
+            } catch {
+              /* socket closing */
+            }
+          },
         },
       );
     };
@@ -248,6 +281,10 @@ async function startOnline(
       } catch {
         /* lobby torn down */
       }
+    };
+    m.onStartDenied = (reason) => {
+      if (!inLobby) return;
+      ui.toast(reason || 'Not all players are ready');
     };
     m.onLobbyStart = () => {
       if (!inLobby) return;

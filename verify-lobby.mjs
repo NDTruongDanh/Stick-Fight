@@ -16,7 +16,7 @@ function rawConnect() {
 function createRoom(name, opts = {}) {
   return new Promise(async (resolve, reject) => {
     const ws = await rawConnect();
-    const rec = { welcome: null, rosters: [], snapshots: 0, starts: 0, closed: null, rejects: [] };
+    const rec = { welcome: null, rosters: [], snapshots: 0, starts: 0, closed: null, rejects: [], denied: [] };
     const timer = setTimeout(() => reject(new Error(name + ": no welcome")), 5000);
     ws.on("message", (raw) => {
       let msg;
@@ -27,6 +27,7 @@ function createRoom(name, opts = {}) {
       else if (msg.t === "start") rec.starts++;
       else if (msg.t === "roomClosed") rec.closed = msg;
       else if (msg.t === "reject") rec.rejects.push(msg);
+      else if (msg.t === "startDenied") rec.denied.push(msg);
     });
     ws.rec = rec;
     ws.send(JSON.stringify({ v: 2, t: "createRoom", name, version: 2, ...opts }));
@@ -36,7 +37,7 @@ function createRoom(name, opts = {}) {
 function joinRoom(name, code) {
   return new Promise(async (resolve, reject) => {
     const ws = await rawConnect();
-    const rec = { welcome: null, rosters: [], snapshots: 0, starts: 0, closed: null, rejects: [] };
+    const rec = { welcome: null, rosters: [], snapshots: 0, starts: 0, closed: null, rejects: [], denied: [] };
     const timer = setTimeout(() => reject(new Error(name + ": no welcome")), 5000);
     ws.on("message", (raw) => {
       let msg;
@@ -47,6 +48,7 @@ function joinRoom(name, code) {
       else if (msg.t === "start") rec.starts++;
       else if (msg.t === "roomClosed") rec.closed = msg;
       else if (msg.t === "reject") rec.rejects.push(msg);
+      else if (msg.t === "startDenied") rec.denied.push(msg);
     });
     ws.rec = rec;
     ws.send(JSON.stringify({ v: 2, t: "joinRoom", code, name, version: 2 }));
@@ -70,15 +72,24 @@ try {
   console.log("1) solo lobby: rosters=" + host.ws.rec.rosters.length + " snapshots=" + host.ws.rec.snapshots + " starts=" + host.ws.rec.starts);
   check("solo joiner held in lobby, no game", host.ws.rec.snapshots === 0 && host.ws.rec.starts === 0);
   check("roster has color + hostId", host.ws.rec.rosters.at(-1)?.players?.every((p) => typeof p.color === "string") && typeof host.ws.rec.rosters.at(-1)?.hostId === "number");
+  check("roster has ready flags", host.ws.rec.rosters.at(-1)?.players?.every((p) => typeof p.ready === "boolean"));
 
   const joiner = await joinRoom("BOB", code);
   check("joiner welcome same code, not host", joiner.ws.rec.welcome?.code === code && joiner.ws.rec.welcome?.isHost === false);
   await sleep(1500);
   console.log("2) two joined, waiting: host starts=" + host.ws.rec.starts + " | joiner starts=" + joiner.ws.rec.starts);
-  check("holds briefly before auto-start", host.ws.rec.starts === 0 && joiner.ws.rec.starts === 0);
-  await sleep(3000);
-  console.log("3) after wait: host starts=" + host.ws.rec.starts + " snaps=" + host.ws.rec.snapshots + " | joiner starts=" + joiner.ws.rec.starts);
-  check("auto-starts once 2+ players joined", host.ws.rec.starts >= 1 && joiner.ws.rec.starts >= 1 && host.ws.rec.snapshots > 0);
+  check("no auto-start when players join (manual ready-up)", host.ws.rec.starts === 0 && joiner.ws.rec.starts === 0);
+  // Manual ready-up: host START is denied until the guest readies up.
+  host.ws.send(JSON.stringify({ v: 2, t: "startMatch" }));
+  await sleep(400);
+  check("host start denied while guest not ready", host.ws.rec.starts === 0 && host.ws.rec.denied.length >= 1);
+  joiner.ws.send(JSON.stringify({ v: 2, t: "ready", ready: true }));
+  await sleep(400);
+  check("guest ready reflected in roster", host.ws.rec.rosters.at(-1)?.players?.find((p) => p.name === "BOB")?.ready === true);
+  host.ws.send(JSON.stringify({ v: 2, t: "startMatch" }));
+  await sleep(1500);
+  console.log("3) after ready+start: host starts=" + host.ws.rec.starts + " snaps=" + host.ws.rec.snapshots + " | joiner starts=" + joiner.ws.rec.starts);
+  check("host START begins match once all ready", host.ws.rec.starts >= 1 && joiner.ws.rec.starts >= 1 && host.ws.rec.snapshots > 0);
 
   const late = await joinRoom("CAROL", code);
   await sleep(800);

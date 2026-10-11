@@ -28,6 +28,8 @@ export type ClientMsg =
   | { v: number; t: 'joinRoom'; code: string; name: string; version: number }
   | { v: number; t: 'leaveRoom' }
   | { v: number; t: 'deleteRoom' }
+  | { v: number; t: 'ready'; ready: boolean }
+  | { v: number; t: 'startMatch' }
   | { v: number; t: 'input'; seq: number; left: boolean; right: boolean; jump: boolean; down: boolean; fire: boolean; block: boolean; throwReq: boolean; aimX: number; aimY: number }
   | { v: number; t: 'ping'; t0: number };
 
@@ -40,6 +42,8 @@ export interface RosterEntry {
   slot: number;
   bot: boolean;
   color?: string;
+  /** Ready-up flag (humans only; bots always report true). */
+  ready: boolean;
 }
 
 export type ServerMsg =
@@ -47,6 +51,7 @@ export type ServerMsg =
   | { v: number; t: 'reject'; reason: string }
   | { v: number; t: 'roster'; players: RosterEntry[]; code: string; hostId: number }
   | { v: number; t: 'start'; levelId: string; seed: number; levelJson?: string; code?: string }
+  | { v: number; t: 'startDenied'; reason: string }
   | { v: number; t: 'snapshot'; tick: number; time: number; levelId: string; round: number; players: SnapshotPlayer[]; projectiles: ProjectileState[]; crates: CrateState[]; barrels: BarrelState[]; drops: DroppedGun[]; events: SnapshotEvent[]; levelJson?: string; acks?: Record<number, number> }
   | { v: number; t: 'pong'; t0: number }
   | { v: number; t: 'matchEnd'; wins: Record<number, number> }
