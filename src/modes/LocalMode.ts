@@ -798,6 +798,9 @@ export class LocalMode {
       // Status timers: frost slows, glue roots. Cleared on death/spawn.
       if (p.frostT > 0) p.frostT = Math.max(0, p.frostT - dt);
       if (p.glueT > 0) p.glueT = Math.max(0, p.glueT - dt);
+      // Dead players cannot move, jump, or act — freeze the corpse in place
+      // (matches server Match.step which skips !alive entirely).
+      if (!p.alive) { p.block = false; return; }
       let L = false, Rr = false, J = false, D = false, F = false, B = false, T = false;
       if (p.bot) { const c = this.botInput(p, dt); L = c.l; Rr = c.r; J = c.j; F = c.fire; B = c.blk; D = c.d; }
       else {
