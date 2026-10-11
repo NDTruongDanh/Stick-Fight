@@ -7,7 +7,7 @@
 // sniper beams, sword/spear melee arcs, shotgun pellets, flamethrower burn.
 // Mechanics: punch-boost, recoil-fly, throw (F, 55 dmg, re-pickup reloads),
 // block (RMB, -65% damage).
-import { GRAVITY, MOVE_SPEED, JUMP_SPEED, MAX_FALL, WORLD_W as W, WORLD_H as H, PLAYER_COLORS, PLAYER_NAMES, PLAYER_HP, WIN_SCORE_DEFAULT, BOSS_HP, BOSS_SCALE, BOSS_SPEED_MULT, BOSS_DAMAGE_TAKEN_MULT, BOSS_KNOCKBACK_TAKEN_MULT, BOSS_MELEE_MULT, BOSS_ROUND_EVERY, BOSS_STOMP_RADIUS, BOSS_STOMP_DAMAGE, BOSS_STOMP_KNOCKBACK, BOSS_STOMP_COOLDOWN, BOSS_SURVIVE_TIME } from '../../shared/constants.js';
+import { GRAVITY, MOVE_SPEED, JUMP_SPEED, MAX_FALL, WORLD_W as W, WORLD_H as H, PLAYER_COLORS, PLAYER_NAMES, PLAYER_HP, WIN_SCORE_DEFAULT } from '../../shared/constants.js';
 import type { DroppedGun, LevelDef, PlayerState, WeaponId } from '../../shared/types.js';
 import type { HudState } from '../ui/hud.js';
 import { LEVELS } from '../levels/levels.js';
@@ -46,7 +46,7 @@ const BURN_TIME = 1.2;
 const isInfinite = (w: WeaponId): boolean => WEAPONS[w].magSize >= 9000;
 const fullAmmo = (w: WeaponId): number => (isInfinite(w) ? -1 : WEAPONS[w].magSize);
 
-interface R { id: number; name: string; color: string; x: number; y: number; vx: number; vy: number; hp: number; alive: boolean; weapon: WeaponId; ammo: number; cd: number; face: 1 | -1; ax: number; ay: number; onGround: boolean; wins: number; bot: boolean; walk: number; flash: number; swing: number; block: boolean; dropT: number; fireHeld: boolean; prevFire: boolean; ground: string; st: number; burnT: number; invuln: number; squash: number; deadT: number; muzzle: number; boss: boolean; maxHp: number; stompCd: number; frostT: number; glueT: number; slide: boolean; wallD: 1 | -1 | 0; wallLock: number }
+interface R { id: number; name: string; color: string; x: number; y: number; vx: number; vy: number; hp: number; alive: boolean; weapon: WeaponId; ammo: number; cd: number; face: 1 | -1; ax: number; ay: number; onGround: boolean; wins: number; bot: boolean; walk: number; flash: number; swing: number; block: boolean; dropT: number; fireHeld: boolean; prevFire: boolean; ground: string; st: number; burnT: number; invuln: number; squash: number; deadT: number; muzzle: number; frostT: number; glueT: number; slide: boolean; wallD: 1 | -1 | 0; wallLock: number }
 interface Proj { x: number; y: number; vx: number; vy: number; life: number; owner: number; kind: WeaponId | 'thrown'; dmg: number; fuse: number; explosive: number; grav: number; bounces: number; thrownW?: WeaponId; ammo?: number }
 interface Solid { x: number; y: number; w: number; h: number; type: string; belt?: number; mi?: number; ri?: number }
 
@@ -78,7 +78,7 @@ export class LocalMode {
   private keys = new Set<string>();
   private mouse = { x: W / 2, y: H / 2, fire: false, block: false };
   private players: R[] = []; private projs: Proj[] = []; private drops: DroppedGun[] = [];
-  private crates: { x: number; y: number; w: number; h: number; vy: number }[] = [];
+  private crates: { x: number; y: number; w: number; h: number; vx: number; vy: number }[] = [];
   private barrels: { x: number; y: number; hp: number }[] = [];
   private fuses: { x: number; y: number; t: number; r: number; dmg: number; owner: number }[] = [];
   private parts: Part[] = []; private feed: string[] = []; private beams: Beam[] = [];
@@ -90,8 +90,6 @@ export class LocalMode {
   private rematchBtn: HTMLButtonElement | null = null;
   private shake = 0; private dropT = 2; private dropRespawn: number[] = []; private off: (() => void)[] = [];
   private deco: { x: number; y: number; s: number }[] = [];
-  private bossId: number | null = null;
-  private bossTime = 0;
   private lastPickup = new Map<number, number>();
   private get winScore(): number { return this.opts.winsTarget ?? WIN_SCORE_DEFAULT; }
 
@@ -99,7 +97,7 @@ export class LocalMode {
     const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('no 2d context'); this.ctx = ctx; let seed = 12345; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647; this.deco = Array.from({ length: 70 }, () => ({ x: rnd() * W, y: rnd() * H * 0.7, s: 1 + rnd() * 3 }));
     const total = Math.min(4, Math.max(1, opts.humans + opts.bots));
     const nH = Math.min(opts.humans, 2);
-    for (let i = 0; i < total; i++) this.players.push({ id: i, name: i === 0 && opts.humans > 0 ? 'YOU' : PLAYER_NAMES[i], color: PLAYER_COLORS[i], x: 0, y: 0, vx: 0, vy: 0, hp: PLAYER_HP, alive: true, weapon: 'fists', ammo: -1, cd: 0, face: i % 2 === 0 ? 1 : -1, ax: 0, ay: 0, onGround: false, wins: 0, bot: i >= nH, walk: 0, flash: 0, swing: 0, block: false, dropT: 0, fireHeld: false, prevFire: false, ground: '', st: 0, burnT: 0, invuln: 0, squash: 0, deadT: 0, muzzle: 0, boss: false, maxHp: PLAYER_HP, stompCd: 0, frostT: 0, glueT: 0, slide: false, wallD: 0, wallLock: 0 });
+    for (let i = 0; i < total; i++) this.players.push({ id: i, name: i === 0 && opts.humans > 0 ? 'YOU' : PLAYER_NAMES[i], color: PLAYER_COLORS[i], x: 0, y: 0, vx: 0, vy: 0, hp: PLAYER_HP, alive: true, weapon: 'fists', ammo: -1, cd: 0, face: i % 2 === 0 ? 1 : -1, ax: 0, ay: 0, onGround: false, wins: 0, bot: i >= nH, walk: 0, flash: 0, swing: 0, block: false, dropT: 0, fireHeld: false, prevFire: false, ground: '', st: 0, burnT: 0, invuln: 0, squash: 0, deadT: 0, muzzle: 0, frostT: 0, glueT: 0, slide: false, wallD: 0, wallLock: 0 });
     // Custom editor level (trusted editor output) goes first in the rotation.
     if (opts.customLevel) {
       this.rotation = [{ ...opts.customLevel, id: 'custom' }, ...LEVELS];
@@ -127,7 +125,7 @@ export class LocalMode {
     window.addEventListener('mousedown', md); window.addEventListener('mouseup', mu); this.canvas.addEventListener('contextmenu', cx);
     this.off = [() => window.removeEventListener('keydown', kd), () => window.removeEventListener('keyup', ku), () => window.removeEventListener('mousemove', mm), () => window.removeEventListener('mousedown', md), () => window.removeEventListener('mouseup', mu), () => this.canvas.removeEventListener('contextmenu', cx)];
     this.levelIdx = 0; this.round = 1; this.spawnAll();
-    this.banner = this.bossBanner() ?? `${this.levelLabel()} — ROUND 1`; this.bannerT = 2; this.last = performance.now();
+    this.banner = `${this.levelLabel()} — ROUND 1`; this.bannerT = 2; this.last = performance.now();
     const loop = (t: number) => { if (!this.running) return; this.update(Math.min(0.033, (t - this.last) / 1000)); this.render(); this.last = t; this.raf = requestAnimationFrame(loop); };
     this.raf = requestAnimationFrame(loop);
   }
@@ -147,7 +145,7 @@ export class LocalMode {
 
   private resetMatch(): void {
     this.players.forEach((p) => (p.wins = 0)); this.round = 1; this.levelIdx = 0; this.matchOver = false; this.frozen = false; this.paused = false;
-    this.spawnAll(); this.banner = this.bossBanner() ?? `${this.levelLabel()} — ROUND 1`; this.bannerT = 2;
+    this.spawnAll(); this.banner = `${this.levelLabel()} — ROUND 1`; this.bannerT = 2;
     this.clearRematchBtn();
   }
 
@@ -186,29 +184,11 @@ export class LocalMode {
     }
   }
 
-  private isBossRound(): boolean {
-    return this.round % BOSS_ROUND_EVERY === 0;
-  }
-
   private spawnAll(): void {
     const lv = this.level();
     // Static platform boxes (px) so a spawn inside a solid gets lifted on top.
     // Full-world camera (no scroll/zoom) always covers every spawn point.
     const plats = lv.platforms.map((p) => ({ x: p.x * W, y: p.y * H, w: p.w * W, h: p.h * H }));
-    // Boss round setup: random player becomes the juggernaut.
-    this.bossId = null;
-    this.bossTime = 0;
-    for (const p of this.players) {
-      p.boss = false;
-      p.maxHp = PLAYER_HP;
-      p.stompCd = 0;
-    }
-    if (this.isBossRound() && this.players.length >= 2) {
-      const pick = this.players[(Math.random() * this.players.length) | 0];
-      pick.boss = true;
-      pick.maxHp = BOSS_HP;
-      this.bossId = pick.id;
-    }
     this.players.forEach((p, i) => {
       const s = lv.spawns[i % lv.spawns.length];
       p.x = Math.max(24, Math.min(W - 24, s[0] * W));
@@ -218,22 +198,11 @@ export class LocalMode {
         const insideY = p.y > pl.y && p.y - 68 < pl.y + pl.h;
         if (insideX && insideY) p.y = pl.y; // stand on top instead of stuck inside
       }
-      p.vx = 0; p.vy = 0; p.hp = p.boss ? BOSS_HP : PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = ''; p.stompCd = 0; p.frostT = 0; p.glueT = 0; p.slide = false; p.wallD = 0; p.wallLock = 0;
+      p.vx = 0; p.vy = 0; p.hp = PLAYER_HP; p.alive = true; p.weapon = 'fists'; p.ammo = -1; p.cd = 0; p.flash = 0; p.block = false; p.burnT = 0; p.invuln = 1.0; p.squash = 0; p.deadT = 0; p.muzzle = 0; p.onGround = false; p.ground = ''; p.frostT = 0; p.glueT = 0; p.slide = false; p.wallD = 0; p.wallLock = 0;
     });
     this.projs = []; this.fuses = []; this.drops = []; this.beams = []; this.dropRespawn = [];
-    this.crates = (lv.crates ?? []).map((c) => ({ x: c.x * W, y: c.y * H, w: c.w * W, h: c.h * H, vy: 0 })); this.barrels = (lv.barrels ?? []).map((b) => ({ x: b.x * W, y: b.y * H, hp: 30 }));
+    this.crates = (lv.crates ?? []).map((c) => ({ x: c.x * W, y: c.y * H, w: c.w * W, h: c.h * H, vx: 0, vy: 0 })); this.barrels = (lv.barrels ?? []).map((b) => ({ x: b.x * W, y: b.y * H, hp: 30 }));
     lv.weaponDrops.slice(0, 2).forEach((d) => this.spawnDrop(d[0] * W));
-    if (this.bossId !== null) {
-      const boss = this.players.find((p) => p.id === this.bossId);
-      if (boss) this.feed.push(`BOSS: ${boss.name} is the BOSS!`);
-      if (this.feed.length > 8) this.feed.shift();
-    }
-  }
-
-  private bossBanner(): string | null {
-    if (this.bossId === null) return null;
-    const boss = this.players.find((p) => p.id === this.bossId);
-    return boss ? `BOSS: ${boss.name} is the BOSS!` : null;
   }
 
   private spawnDrop(x: number): void {
@@ -419,12 +388,10 @@ export class LocalMode {
     if (!v.alive || this.frozen) return;
     // Headshot x2: hit within top 25% of victim AABB (feet-based y, 68px tall).
     if (headshot) dmg *= 2;
-    if (v.boss) dmg *= BOSS_DAMAGE_TAKEN_MULT;
     // Spawn invuln (1s) absorbs combat damage but not falls/lava.
     if (v.invuln > 0 && cause !== 'fell' && cause !== 'lava' && dmg < 900) return;
     const wasBlock = v.block;
     if (wasBlock) { dmg *= BLOCK_FACTOR; kx *= 0.3; ky *= 0.3; }
-    if (v.boss) { kx *= BOSS_KNOCKBACK_TAKEN_MULT; ky *= BOSS_KNOCKBACK_TAKEN_MULT; }
     v.hp -= dmg; v.flash = 0.18; v.vx += kx; v.vy += ky;
     // Hit feedback: particles + shake + sound (clang when blocked).
     this.burst(v.x, v.y - 40, wasBlock ? 6 : 8, wasBlock ? '#93c5fd' : '#f87171', 300);
@@ -464,22 +431,6 @@ export class LocalMode {
     for (const b of this.barrels) if (b.hp > 0 && Math.hypot(b.x - x, b.y - y) < r) { b.hp = 0; this.fuses.push({ x: b.x, y: b.y, t: 0.12, r: 150, dmg: 55, owner }); }
   }
 
-  private doStomp(p: R): void {
-    const cx = p.x, cy = p.y - 34;
-    this.burst(cx, p.y - 6, 18, '#fbbf24', 420);
-    this.burst(cx, cy, 10, '#78716c', 300);
-    this.shake = Math.max(this.shake, 0.4);
-    this.sfx.boom();
-    for (const e of this.players) {
-      if (e === p || !e.alive) continue;
-      const dx = e.x - cx, dy = (e.y - 34) - cy;
-      const d = Math.hypot(dx, dy);
-      if (d > BOSS_STOMP_RADIUS + 20) continue;
-      const a = Math.atan2(dy, dx);
-      this.hurt(e, BOSS_STOMP_DAMAGE, Math.cos(a) * BOSS_STOMP_KNOCKBACK, Math.sin(a) * BOSS_STOMP_KNOCKBACK * 0.5 - 200, p.id, 'stomp');
-    }
-  }
-
   private nearestEnemy(b: R): R | null {
     let best: R | null = null, bd = 1e9;
     for (const p of this.players) { if (p === b || !p.alive) continue; const d = Math.abs(p.x - b.x) + Math.abs(p.y - b.y); if (d < bd) { bd = d; best = p; } }
@@ -511,16 +462,7 @@ export class LocalMode {
     const o = { l: false, r: false, j: false, fire: false, blk: false, d: false };
     const foe = this.nearestEnemy(b);
     if (!foe) return o;
-    if (b.boss) {
-      // Juggernaut: chase the nearest foe, punch up close, stomp when clustered.
-      const dx = foe.x - b.x;
-      o.l = dx < -8; o.r = dx > 8;
-      if (foe.y < b.y - 70 && b.onGround) o.j = true;
-      b.ax = foe.x; b.ay = foe.y - 34;
-      const dist = Math.hypot(foe.x - b.x, foe.y - b.y);
-      if (dist < 90) o.fire = true;
-      if (dist < BOSS_STOMP_RADIUS + 10 && b.stompCd <= 0) { o.d = true; o.fire = true; }
-    } else if (b.weapon === 'fists') {
+    if (b.weapon === 'fists') {
       let tx = foe.x, ty = foe.y, bd = 1e9;
       for (const g of this.drops) { const dd = Math.abs(g.x - b.x) + Math.abs(g.y - b.y); if (dd < bd) { bd = dd; tx = g.x; ty = g.y; } }
       o.l = tx < b.x - 8; o.r = tx > b.x + 8;
@@ -614,7 +556,7 @@ export class LocalMode {
         if (d < w.melee.range + 20 && da < w.melee.arc / 2 + 0.35) {
           // Walls block melee: no spear/sword/fist hits through a pillar.
           if (this.segmentBlocked(sx, sy, e.x, e.y - 34, solids)) continue;
-          this.hurt(e, p.boss ? w.damage * BOSS_MELEE_MULT : w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon, sy < e.y - 51);
+          this.hurt(e, w.damage, Math.cos(aim) * w.knockback, -260, p.id, p.weapon, sy < e.y - 51);
         }
       };
       // Punch-boost: swinging fists airborne kicks the attacker (mobility).
@@ -724,29 +666,72 @@ export class LocalMode {
         this.levelIdx = n;
       }
       this.spawnAll(); // clears projectiles, fresh spawns
-      this.banner = this.bossBanner() ?? `${this.levelLabel()} — ROUND ${this.round}`; this.bannerT = 2;
+      this.banner = `${this.levelLabel()} — ROUND ${this.round}`; this.bannerT = 2;
       return;
     }
-    // Boss survive timer: boss alive for 45s wins the round.
-    if (this.bossId !== null && this.roundLock <= 0) {
-      const boss = this.players.find((p) => p.id === this.bossId);
-      if (boss && boss.alive) {
-        this.bossTime += dt;
-        if (this.bossTime >= BOSS_SURVIVE_TIME) {
-          boss.wins++;
-          this.matchOver = boss.wins >= this.winScore;
-          this.banner = this.matchOver ? `${boss.name} WINS THE MATCH!  [R] REMATCH · [Q] MENU` : `${boss.name} SURVIVES!  (${boss.wins}/${this.winScore})`;
-          this.bannerT = this.matchOver ? 1e9 : 1.5;
-          this.feed.push(`${boss.name} survived the hunt!`);
-          if (this.feed.length > 8) this.feed.shift();
-          this.sfx.win();
-          this.roundLock = 1.5;
-          return;
+    const solids = this.solids();
+    {
+      const statics = solids.filter((s) => s.type !== 'crate');
+      const overlaps = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): boolean =>
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      for (const c of this.crates) {
+        c.vy = Math.min(1400, c.vy + GRAVITY * dt);
+        c.x += (c.vx ?? 0) * dt;
+        c.vx = (c.vx ?? 0) * (1 - Math.min(1, 3 * dt));
+        if (c.x < 0) { c.x = 0; c.vx = 0; }
+        if (c.x + c.w > W) { c.x = W - c.w; c.vx = 0; }
+        c.y += c.vy * dt;
+        for (const s of statics) {
+          if (!overlaps(c, s)) continue;
+          if (c.vy >= 0 && c.y < s.y && c.y + c.h - s.y < 30) { c.y = s.y - c.h; c.vy = 0; }
+          else {
+            const ox = Math.min(c.x + c.w, s.x + s.w) - Math.max(c.x, s.x);
+            const oy = Math.min(c.y + c.h, s.y + s.h) - Math.max(c.y, s.y);
+            if (ox < oy) { if (c.x + c.w / 2 < s.x + s.w / 2) c.x = s.x - c.w; else c.x = s.x + s.w; c.vx = 0; }
+            else if (c.y + c.h / 2 < s.y + s.h / 2) { c.y = s.y - c.h; c.vy = 0; }
+            else { c.y = s.y + s.h; if (c.vy < 0) c.vy = 0; }
+          }
         }
       }
+      // Crate-on-crate stacking so Chandelier's pyramid stays stacked. Only the
+      // upper crate moves; the lower crate is left alone (its own pass is a
+      // no-op when below), otherwise the bottom dodges and the top tunnels.
+      for (let pass = 0; pass < 3; pass++) {
+        let moved = false;
+        for (let i = 0; i < this.crates.length; i++) {
+          const c = this.crates[i];
+          for (let j = 0; j < this.crates.length; j++) {
+            if (i === j) continue;
+            const o = this.crates[j];
+            if (!overlaps(c, o)) continue;
+            const cMidY = c.y + c.h / 2;
+            const oMidY = o.y + o.h / 2;
+            if (cMidY < oMidY - 1) {
+              const xOverlap = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+              if (c.vy >= 0 && xOverlap > 8) { c.y = o.y - c.h; c.vy = 0; moved = true; }
+              else if (c.y < o.y && c.y + c.h - o.y < 30 && c.vy >= 0) { c.y = o.y - c.h; c.vy = 0; moved = true; }
+              else {
+                const ox = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+                const oy = Math.min(c.y + c.h, o.y + o.h) - Math.max(c.y, o.y);
+                if (ox < oy) { if (c.x + c.w / 2 < o.x + o.w / 2) c.x = o.x - c.w; else c.x = o.x + o.w; c.vx = 0; moved = true; }
+                else { c.y = o.y - c.h; c.vy = 0; moved = true; }
+              }
+            } else if (cMidY > oMidY + 1) {
+              continue;
+            } else {
+              const ox = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+              const oy = Math.min(c.y + c.h, o.y + o.h) - Math.max(c.y, o.y);
+              if (ox < oy) { if (c.x + c.w / 2 < o.x + o.w / 2) c.x = o.x - c.w; else c.x = o.x + o.w; c.vx = 0; moved = true; }
+              else if (c.y + c.h / 2 < o.y + o.h / 2) { c.y = o.y - c.h; c.vy = 0; moved = true; }
+              else if (c.y + c.h / 2 > o.y + o.h / 2) { continue; }
+              else if (c.x + c.w / 2 < o.x + o.w / 2) { c.x = o.x - c.w; c.vx = 0; moved = true; }
+              else { c.x = o.x + o.w; c.vx = 0; moved = true; }
+            }
+          }
+        }
+        if (!moved) break;
+      }
     }
-    const solids = this.solids();
-    for (const c of this.crates) { c.vy = Math.min(1400, c.vy + GRAVITY * dt); c.y += c.vy * dt; for (const s of solids) { if (s.type !== 'crate' && c.x < s.x + s.w && c.x + c.w > s.x && c.y < s.y + s.h && c.y + c.h > s.y && c.vy > 0 && c.y + c.h - s.y < 30) { c.y = s.y - c.h; c.vy = 0; } } }
     this.dropT -= dt;
     if (this.dropT <= 0) { this.dropT = 3.5; const lv = this.level(); if (this.drops.length < 4) { const d = lv.weaponDrops[(Math.random() * lv.weaponDrops.length) | 0]; this.spawnDrop(d[0] * W); } }
     for (const g of this.drops) {
@@ -777,7 +762,6 @@ export class LocalMode {
     }
     for (const p of this.players) {
       if (!p.alive) continue;
-      if (p.boss) continue; // boss is fists-only, never picks up guns
       const g = this.drops.find((g) => g.vy >= 0 && Math.hypot(g.x - p.x, g.y - (p.y - 30)) < 30);
       if (!g) continue;
       // Re-pickup reloads to a full mag (thrown/empty guns become useful again).
@@ -788,7 +772,6 @@ export class LocalMode {
     this.drops = this.drops.filter((g) => g.y < H + 900);
     this.players.forEach((p, idx) => {
       p.cd = Math.max(0, p.cd - dt); p.flash = Math.max(0, p.flash - dt); p.swing = Math.max(0, p.swing - dt);
-      p.stompCd = Math.max(0, p.stompCd - dt);
       // Flamethrower burn DoT.
       if (p.burnT > 0 && p.alive) {
         p.burnT -= dt; p.hp -= BURN_DPS * dt;
@@ -815,7 +798,7 @@ export class LocalMode {
       const frosted = p.frostT > 0 && p.alive;
       const dir = glued ? 0 : (Rr ? 1 : 0) - (L ? 1 : 0);
       if (dir !== 0) p.face = dir > 0 ? 1 : -1;
-      const spdMult = (p.boss ? BOSS_SPEED_MULT : 1) * (frosted ? 0.5 : 1);
+      const spdMult = frosted ? 0.5 : 1;
       if (glued) {
         // Rooted: no accel, strong friction (can still fire/block).
         p.vx *= Math.pow(0.7, dt * 60);
@@ -897,14 +880,7 @@ export class LocalMode {
       this.checkHazards(p);
       if (Math.abs(p.vx) > 40 && p.onGround) p.walk += dt * 11;
       const w = WEAPONS[p.weapon];
-      // Boss shockwave stomp: down+fire, 1.5s cooldown. Suppresses normal fire.
-      let stomped = false;
-      if (p.boss && p.alive && D && F && p.stompCd <= 0) {
-        p.stompCd = BOSS_STOMP_COOLDOWN;
-        this.doStomp(p);
-        stomped = true;
-      }
-      if (!stomped && F && (w.auto || !p.fireHeld)) this.tryFire(p);
+      if (F && (w.auto || !p.fireHeld)) this.tryFire(p);
       // Empty non-melee gun falls back to fists (throw first if you want the 55dmg toss).
       if (!isInfinite(p.weapon) && p.ammo <= 0 && !w.melee && !w.beam) { p.weapon = 'fists'; p.ammo = -1; }
       p.fireHeld = F;
@@ -979,8 +955,6 @@ export class LocalMode {
       onGround: p.onGround,
       wins: p.wins,
       kills: 0,
-      boss: p.boss,
-      maxHp: p.maxHp,
       hpBlink: p.flash,
       blockHeld: p.block,
       invulnT: p.invuln,
@@ -991,18 +965,7 @@ export class LocalMode {
 
   private stick(p: R): void {
     const c = this.ctx;
-    if (p.boss && p.alive) {
-      // Juggernaut: draw 1.8x scaled around the feet, then crown/horns + HP bar.
-      c.save();
-      c.translate(p.x, p.y);
-      c.scale(BOSS_SCALE, BOSS_SCALE);
-      c.translate(-p.x, -p.y);
-      drawStick(c, this.toPlayerState(p) as PlayerState, this.time);
-      c.restore();
-      this.drawBossAdornments(p);
-    } else {
-      drawStick(this.ctx, this.toPlayerState(p) as PlayerState, this.time);
-    }
+    drawStick(this.ctx, this.toPlayerState(p) as PlayerState, this.time);
     // Muzzle flash star at the gun tip while firing.
     if (p.muzzle > 0 && p.alive && p.weapon !== 'fists') {
       const shY = p.y - 46;
@@ -1030,63 +993,6 @@ export class LocalMode {
       c.fill();
       c.restore();
     }
-  }
-
-  private drawBossAdornments(p: R): void {
-    const c = this.ctx;
-    // Scaled head sits at feet - 48*1.8; crown floats just above.
-    const headY = p.y - 48 * BOSS_SCALE;
-    const cx = p.x;
-    c.save();
-    // Horns (red devils) + gold crown.
-    c.fillStyle = '#dc2626';
-    c.beginPath();
-    c.moveTo(cx - 14, headY - 6);
-    c.lineTo(cx - 20, headY - 20);
-    c.lineTo(cx - 8, headY - 12);
-    c.closePath();
-    c.fill();
-    c.beginPath();
-    c.moveTo(cx + 14, headY - 6);
-    c.lineTo(cx + 20, headY - 20);
-    c.lineTo(cx + 8, headY - 12);
-    c.closePath();
-    c.fill();
-    c.fillStyle = '#facc15';
-    c.strokeStyle = '#0a0a0a';
-    c.lineWidth = 2;
-    const cw = 26, ch = 12, cy = headY - 22;
-    c.beginPath();
-    c.moveTo(cx - cw / 2, cy);
-    c.lineTo(cx - cw / 2, cy - ch);
-    c.lineTo(cx - cw / 4, cy - ch + 5);
-    c.lineTo(cx, cy - ch - 3);
-    c.lineTo(cx + cw / 4, cy - ch + 5);
-    c.lineTo(cx + cw / 2, cy - ch);
-    c.lineTo(cx + cw / 2, cy);
-    c.closePath();
-    c.fill();
-    c.stroke();
-    // HP bar above crown.
-    const bw = 84, bx = cx - bw / 2, by = cy - ch - 16;
-    const frac = Math.max(0, Math.min(1, p.hp / Math.max(1, p.maxHp)));
-    c.fillStyle = 'rgba(0,0,0,0.65)';
-    c.fillRect(bx - 2, by - 2, bw + 4, 10);
-    c.fillStyle = '#3f3f46';
-    c.fillRect(bx, by, bw, 6);
-    c.fillStyle = frac > 0.5 ? '#22c55e' : frac > 0.25 ? '#facc15' : '#ef4444';
-    c.fillRect(bx, by, bw * frac, 6);
-    c.fillStyle = '#fff';
-    c.font = 'bold 9px sans-serif';
-    c.textAlign = 'center';
-    c.fillText(`BOSS ${Math.ceil(p.hp)}/${p.maxHp}`, cx, by - 4);
-    // Boss survive countdown.
-    if (this.bossId === p.id && this.bossTime < BOSS_SURVIVE_TIME) {
-      c.fillStyle = '#fde047';
-      c.font = 'bold 11px sans-serif';
-      c.fillText(`${Math.ceil(BOSS_SURVIVE_TIME - this.bossTime)}s`, cx, by + 22);
-    }
-    c.restore();
   }
 
   private render(): void {

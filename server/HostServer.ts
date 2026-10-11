@@ -272,7 +272,7 @@ class Room {
       hp: p.hp, alive: p.alive,
       weapon: p.weapon, ammo: p.ammo, cooldown: p.cooldown,
       onGround: p.onGround, wins: p.wins, kills: p.kills,
-      isBot: p.isBot, boss: p.boss, maxHp: p.maxHp,
+      isBot: p.isBot,
     }));
     const projectiles = this.match.projectiles.map((pr) => ({
       id: pr.id, kind: pr.kind, x: pr.x, y: pr.y, vx: pr.vx, vy: pr.vy,

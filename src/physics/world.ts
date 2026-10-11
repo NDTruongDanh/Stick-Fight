@@ -139,7 +139,7 @@ export class World {
     this.rotators = [...(level.rotators ?? [])];
     this.crates = (level.crates ?? []).map((c) => {
       const p = denorm(c);
-      return { x: p.x, y: p.y - p.h, w: p.w, h: p.h, vx: 0, vy: 0, angle: 0 };
+      return { x: p.x, y: p.y, w: p.w, h: p.h, vx: 0, vy: 0, angle: 0 };
     });
     this.barrels = (level.barrels ?? []).map((b) => ({
       x: b.x * WORLD_W, y: b.y * WORLD_H, hp: 30,

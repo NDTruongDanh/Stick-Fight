@@ -54,8 +54,7 @@ npm run host:ws-only # WS game server only, no web UI (old behavior)
 ```
 
 Match config: the create-room screen has a round-wins picker (3 / 5 / 10,
-default 5) plus arena + bots. First to the target takes the match. Every
-5th round is a boss round. A custom editor JSON uploaded while creating a
+default 5) plus arena + bots. First to the target takes the match. A custom editor JSON uploaded while creating a
 room is sent to the server with the room — joiners receive it automatically.
 
 ### Host flags
@@ -149,8 +148,8 @@ Click **LEVEL EDITOR** on the menu to paste or edit level JSON, then
 
 ## Features
 
-- Local multiplayer (1–4 fighters, keyboard + bots) with 12 rotating arenas:
-  Woods 1, Box Fort, Factory Lifts (conveyor + movers), Windmill (rotator),
+- Local multiplayer (1–4 fighters, keyboard + bots) with 11 rotating arenas:
+  Woods 1, Box Fort, Factory Lifts (conveyor + movers),
   Ice Spikes (ice + spikes), Lava Pit, Laser Grid (gated lasers),
   Barrel Showdown, Ghost House (bouncy + blink), Chain Hold (blink chains +
   spike-ball pendulum), Rooftop (side lifts + drop-catching roof), Chandelier
@@ -162,7 +161,6 @@ Click **LEVEL EDITOR** on the menu to paste or edit level JSON, then
   flamethrower (burn), sword / spear (melee arcs), laser (beam), snake /
   snakeshot (homing) — falling drops, weapon throwing (55 dmg, re-pickup
   reloads), punch-boost, recoil-fly, block (−65% damage)
-- Boss round every 5th round
 - Match config on the menu: local humans stepper, bots toggle, round-wins
   target (3 / 5 / 10, persisted) with a live arena-count preview
 - Arcade HUD: win stars, alive dots, ammo, killfeed, round banners
@@ -179,4 +177,4 @@ Click **LEVEL EDITOR** on the menu to paste or edit level JSON, then
 - Sound effects + music, screen-shake tuning, particle polish
 - Mobile / touch controls
 - Docker image for one-command LAN hosting (see Docker LAN host section)
-- More weapons, boss variety, and level hazards
+- More weapons, level hazards

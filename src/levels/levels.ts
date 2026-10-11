@@ -49,18 +49,6 @@ export const LEVELS: LevelDef[] = [
     weaponDrops: [[0.4, 0.6], [0.46, 0.12]],
   },
   {
-    id: 'windmill', name: 'Windmill', theme: 'windmill',
-    platforms: [
-      { x: 0, y: 0.9, w: 1, h: 0.1 },
-      { x: 0.04, y: 0.62, w: 0.18, h: 0.035 },
-      { x: 0.78, y: 0.62, w: 0.18, h: 0.035 },
-      { x: 0.4, y: 0.78, w: 0.2, h: 0.035 },
-    ],
-    rotators: [{ cx: 0.5, cy: 0.42, w: 0.3, h: 0.04, angleSpeed: 0.9 }],
-    spawns: [[0.08, 0.8], [0.92, 0.8], [0.1, 0.52], [0.9, 0.52]],
-    weaponDrops: [[0.45, 0.72], [0.5, 0.3]],
-  },
-  {
     id: 'winter7', name: 'Ice Spikes', theme: 'winter',
     platforms: [
       { x: 0, y: 0.9, w: 0.4, h: 0.1 },

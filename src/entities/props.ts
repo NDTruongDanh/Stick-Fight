@@ -21,7 +21,13 @@ function groundAt(world: any, c: { x: number; y: number; w: number; h: number })
 
 export function stepCrates(crates: CrateState[], dt: number, world: any): void {
   dt = Math.min(Math.max(dt, 0), 1 / 30);
-  for (const c of crates ?? []) {
+  const list = crates ?? [];
+  const overlaps = (
+    a: { x: number; y: number; w: number; h: number },
+    b: { x: number; y: number; w: number; h: number },
+  ): boolean =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  for (const c of list) {
     c.vy += GRAVITY * dt;
     if (c.vy > 1600) c.vy = 1600;
     c.x += (c.vx ?? 0) * dt;
@@ -51,6 +57,73 @@ export function stepCrates(crates: CrateState[], dt: number, world: any): void {
     c.y = ny;
     if (c.x < 0) { c.x = 0; c.vx = 0; }
     if (c.x + c.w > WORLD_W) { c.x = WORLD_W - c.w; c.vx = 0; }
+  }
+  // Crate-on-crate stacking so pre-stacked layouts (e.g. Chandelier's pyramid)
+  // rest on each other instead of falling through to the floor. Only the
+  // upper crate moves; the lower crate is left alone.
+  for (let pass = 0; pass < 3; pass++) {
+    let moved = false;
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
+      for (let j = 0; j < list.length; j++) {
+        if (i === j) continue;
+        const o = list[j];
+        if (!overlaps(c, o)) continue;
+        const cMidY = c.y + c.h / 2;
+        const oMidY = o.y + o.h / 2;
+        if (cMidY < oMidY - 1) {
+          const xOverlap = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+          if ((c.vy ?? 0) >= 0 && xOverlap > 8) {
+            c.y = o.y - c.h;
+            c.vy = 0;
+            moved = true;
+          } else if (c.y < o.y && c.y + c.h - o.y < 24 && (c.vy ?? 0) >= 0) {
+            c.y = o.y - c.h;
+            c.vy = 0;
+            moved = true;
+          } else {
+            const ox = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+            const oy = Math.min(c.y + c.h, o.y + o.h) - Math.max(c.y, o.y);
+            if (ox < oy) {
+              if (c.x + c.w / 2 < o.x + o.w / 2) c.x = o.x - c.w;
+              else c.x = o.x + o.w;
+              c.vx = 0;
+              moved = true;
+            } else {
+              c.y = o.y - c.h;
+              c.vy = 0;
+              moved = true;
+            }
+          }
+        } else if (cMidY > oMidY + 1) {
+          continue;
+        } else {
+          const ox = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+          const oy = Math.min(c.y + c.h, o.y + o.h) - Math.max(c.y, o.y);
+          if (ox < oy) {
+            if (c.x + c.w / 2 < o.x + o.w / 2) c.x = o.x - c.w;
+            else c.x = o.x + o.w;
+            c.vx = 0;
+            moved = true;
+          } else if (c.y + c.h / 2 < o.y + o.h / 2) {
+            c.y = o.y - c.h;
+            c.vy = 0;
+            moved = true;
+          } else if (c.y + c.h / 2 > o.y + o.h / 2) {
+            continue;
+          } else if (c.x + c.w / 2 < o.x + o.w / 2) {
+            c.x = o.x - c.w;
+            c.vx = 0;
+            moved = true;
+          } else {
+            c.x = o.x + o.w;
+            c.vx = 0;
+            moved = true;
+          }
+        }
+      }
+    }
+    if (!moved) break;
   }
 }
 

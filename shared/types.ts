@@ -57,8 +57,6 @@ export interface PlayerState {
   weapon: WeaponId; ammo: number; cooldown: number;
   onGround: boolean; wins: number; kills: number;
   isBot?: boolean;
-  boss?: boolean;
-  maxHp?: number;
 }
 
 export interface ProjectileState {

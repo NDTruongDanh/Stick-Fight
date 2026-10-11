@@ -1,16 +1,5 @@
 import {
   AIR_CONTROL,
-  BOSS_DAMAGE_TAKEN_MULT,
-  BOSS_HP,
-  BOSS_KNOCKBACK_TAKEN_MULT,
-  BOSS_MELEE_MULT,
-  BOSS_ROUND_EVERY,
-  BOSS_SPEED_MULT,
-  BOSS_STOMP_COOLDOWN,
-  BOSS_STOMP_DAMAGE,
-  BOSS_STOMP_KNOCKBACK,
-  BOSS_STOMP_RADIUS,
-  BOSS_SURVIVE_TIME,
   GRAVITY,
   JUMP_SPEED,
   MAX_FALL,
@@ -206,9 +195,6 @@ export class Match {
   private cycle: LevelDef[];
   private cycleIndex = 0;
   private winScore: number;
-  private bossId: number | null = null;
-  private bossTime = 0;
-  private stompCd = new Map<number, number>();
   private lastPickup = new Map<number, number>();
   private wallLocks = new Map<number, number>();
 
@@ -228,7 +214,6 @@ export class Match {
       aimX: 0, aimY: 0, hp: PLAYER_HP, alive: true,
       weapon: "fists", ammo: 0, cooldown: 0,
       onGround: false, wins: this.wins[id] ?? 0, kills: 0, isBot,
-      boss: false, maxHp: PLAYER_HP,
     };
     this.players.push(p);
     this.spawnPlayer(p);
@@ -241,14 +226,12 @@ export class Match {
     this.prevJump.delete(id);
     this.prevThrow.delete(id);
     this.blocking.delete(id);
-    this.stompCd.delete(id);
     this.lastPickup.delete(id);
     this.wallLocks.delete(id);
     this.burns.delete(id);
     this.burnOwners.delete(id);
     this.frosts.delete(id);
     this.glues.delete(id);
-    if (this.bossId === id) this.bossId = null;
   }
 
   ensureBots(): void {
@@ -314,9 +297,6 @@ export class Match {
       const inp = inputs.get(p.id) ?? emptyInput();
       this.blocking.set(p.id, inp.block);
       if (p.cooldown > 0) p.cooldown -= dt;
-      const scd = (this.stompCd.get(p.id) ?? 0) - dt;
-      if (scd <= 0) this.stompCd.delete(p.id);
-      else this.stompCd.set(p.id, scd);
       if (!p.alive) continue;
       p.aimX = inp.aimX;
       p.aimY = inp.aimY;
@@ -327,13 +307,7 @@ export class Match {
       const pt = this.prevThrow.get(p.id) ?? false;
       if (inp.throwReq && !pt) this.tryThrow(p, inp);
       this.prevThrow.set(p.id, inp.throwReq);
-      // Boss shockwave stomp: down+fire, 1.5s cooldown. Suppresses normal fire.
-      if (p.boss && inp.down && inp.fire) {
-        if ((this.stompCd.get(p.id) ?? 0) <= 0) {
-          this.stompCd.set(p.id, BOSS_STOMP_COOLDOWN);
-          this.doStomp(p);
-        }
-      } else if (inp.fire) {
+      if (inp.fire) {
         this.tryFire(p, inp);
       }
       this.tryPickup(p);
@@ -353,24 +327,7 @@ export class Match {
     this.checkRound(dt);
   }
 
-  private doStomp(p: PlayerState): void {
-    const cx = p.x, cy = p.y + PH / 2;
-    this.events.push({ kind: "stomp", a: p.id });
-    for (const q of this.players) {
-      if (q.id === p.id || !q.alive) continue;
-      const dx = q.x - cx, dy = q.y + PH / 2 - cy;
-      const d = Math.hypot(dx, dy);
-      if (d > BOSS_STOMP_RADIUS + 20) continue;
-      const a = Math.atan2(dy, dx);
-      this.damage(q, BOSS_STOMP_DAMAGE, p.id, Math.cos(a) * BOSS_STOMP_KNOCKBACK, Math.sin(a) * BOSS_STOMP_KNOCKBACK * 0.5 - 200, "stomp");
-    }
-  }
-
   // ---- setup ----
-
-  private isBossRound(): boolean {
-    return this.round % BOSS_ROUND_EVERY === 0;
-  }
 
   private resetArena(): void {
     this.projectiles = [];
@@ -380,9 +337,6 @@ export class Match {
     this.burnOwners.clear();
     this.frosts.clear();
     this.glues.clear();
-    this.bossTime = 0;
-    this.bossId = null;
-    this.stompCd.clear();
     this.wallLocks.clear();
     this.crates = (this.level.crates ?? []).map((c) => ({
       x: (c.x * WORLD_W) | 0, y: (c.y * WORLD_H) | 0,
@@ -392,28 +346,12 @@ export class Match {
     this.barrels = (this.level.barrels ?? []).map((b) => ({
       x: b.x * WORLD_W, y: b.y * WORLD_H, hp: 50,
     }));
-    // Boss round: random player becomes the juggernaut.
     for (const p of this.players) {
-      p.boss = false;
-      p.maxHp = PLAYER_HP;
-    }
-    if (this.isBossRound() && this.players.length >= 2) {
-      const pick = this.players[(Math.random() * this.players.length) | 0];
-      pick.boss = true;
-      pick.maxHp = BOSS_HP;
-      this.bossId = pick.id;
-    }
-    for (const p of this.players) {
-      p.hp = p.boss ? BOSS_HP : PLAYER_HP;
-      p.maxHp = p.boss ? BOSS_HP : PLAYER_HP;
+      p.hp = PLAYER_HP;
       p.alive = true; p.vx = 0; p.vy = 0;
       p.weapon = "fists"; p.ammo = 0; p.cooldown = 0;
       p.wins = this.wins[p.id] ?? 0;
       this.spawnPlayer(p);
-    }
-    if (this.bossId !== null) {
-      const boss = this.players.find((p) => p.id === this.bossId);
-      if (boss) this.events.push({ kind: "boss", text: `BOSS: ${boss.name} is the BOSS!`, a: boss.id });
     }
   }
 
@@ -424,8 +362,7 @@ export class Match {
     p.x = s[0] * WORLD_W;
     p.y = s[1] * WORLD_H - PH;
     p.vx = 0; p.vy = 0;
-    p.hp = p.boss ? BOSS_HP : PLAYER_HP;
-    p.maxHp = p.boss ? BOSS_HP : PLAYER_HP;
+    p.hp = PLAYER_HP;
     p.alive = true;
   }
 
@@ -448,7 +385,7 @@ export class Match {
 
   // ---- physics ----
 
-  private solids(): Solid[] {
+  private solids(includeCrates = true): Solid[] {
     const out: Solid[] = [];
     for (const pl of this.level.platforms) {
       let on = true;
@@ -480,7 +417,9 @@ export class Match {
       const bw = pw * c + ph * s, bh = pw * s + ph * c;
       out.push({ x: r.cx * WORLD_W - bw / 2, y: r.cy * WORLD_H - bh / 2, w: bw, h: bh, type: "rotator", ri: (this.level.rotators ?? []).indexOf(r) });
     }
-    for (const c of this.crates) out.push({ x: c.x, y: c.y, w: c.w, h: c.h, type: "static" });
+    for (const c of this.crates) {
+      if (includeCrates) out.push({ x: c.x, y: c.y, w: c.w, h: c.h, type: "static" });
+    }
     return out;
   }
 
@@ -515,7 +454,7 @@ export class Match {
     const dir = glued ? 0 : rawDir;
     if (dir !== 0) p.facing = dir;
     const accel = p.onGround ? 1 : AIR_CONTROL;
-    const speedMult = (p.boss ? BOSS_SPEED_MULT : 1) * (frosted ? 0.5 : 1);
+    const speedMult = frosted ? 0.5 : 1;
     const target = dir * MOVE_SPEED * speedMult;
     p.vx += (target - p.vx) * Math.min(1, (p.onGround ? 14 : 7) * accel * dt);
     if (glued && p.onGround) p.vx *= 1 - Math.min(1, 8 * dt);
@@ -755,8 +694,7 @@ export class Match {
         // Walls block melee: no spear/sword/fist hits through a pillar into
         // a sealed area (Box Fort). Matches sniper cover behavior.
         if (this.segmentBlocked(cx, cy, q.x, q.y + PH / 2, solids)) continue;
-        const meleeDmg = p.boss ? def.damage * BOSS_MELEE_MULT : def.damage;
-        this.damage(q, meleeDmg, p.id, dx * def.knockback, -260, p.weapon, p.y + PH / 2 < q.y + PH * 0.25);
+        this.damage(q, def.damage, p.id, dx * def.knockback, -260, p.weapon, p.y + PH / 2 < q.y + PH * 0.25);
       }
       // Punch-boost: airborne fists swing kicks the attacker (mobility).
       if (p.weapon === "fists" && !p.onGround) {
@@ -882,7 +820,6 @@ export class Match {
 
   private tryPickup(p: PlayerState): void {
     if (!p.alive || p.weapon !== "fists") return;
-    if (p.boss) return; // boss is fists-only
     for (let i = 0; i < this.drops.length; i++) {
       const d = this.drops[i];
       if (Math.abs(d.x - p.x) < 34 && Math.abs(d.y - (p.y + PH / 2)) < 48) {
@@ -901,7 +838,6 @@ export class Match {
     let final = dmg;
     // Headshot x2: hit within top 25% of victim AABB (top-based y, PH tall).
     if (headshot) final *= 2;
-    if (q.boss) final *= BOSS_DAMAGE_TAKEN_MULT;
     if (this.blocking.get(q.id)) {
       // Block reduces damage by 65% when facing the attacker.
       const attacker = this.players.find((p) => p.id === fromId);
@@ -909,9 +845,9 @@ export class Match {
       else final *= 1;
     }
     q.hp -= final;
-    const kbMult = (q.boss ? BOSS_KNOCKBACK_TAKEN_MULT : 1) * (this.blocking.get(q.id) ? 0.4 : 1);
+    const kbMult = this.blocking.get(q.id) ? 0.4 : 1;
     q.vx += kx * kbMult;
-    q.vy += ky * (q.boss ? BOSS_KNOCKBACK_TAKEN_MULT : 1);
+    q.vy += ky;
     if (q.hp <= 0) {
       q.hp = 0;
       q.alive = false;
@@ -1006,14 +942,25 @@ export class Match {
           break;
         }
       }
-      // crates
-      for (let i = this.crates.length - 1; i >= 0; i--) {
-        const c = this.crates[i];
-        if (pr.x >= c.x && pr.x <= c.x + c.w && pr.y >= c.y && pr.y <= c.y + c.h) {
-          this.crates.splice(i, 1);
-          this.events.push({ kind: "crate" });
-          dead = true;
-          break;
+      // crates: weapon projectiles push boxes, never destroy them.
+      // Beam tracers carry 0 damage and skip (visual only, like player hits).
+      if (pr.damage > 0) {
+        for (const c of this.crates) {
+          if (pr.x >= c.x && pr.x <= c.x + c.w && pr.y >= c.y && pr.y <= c.y + c.h) {
+            const def = WEAPONS[pr.kind as WeaponId];
+            const base = pr.thrown ? 380 : (def?.knockback ?? 320);
+            const l = Math.hypot(pr.vx, pr.vy) || 1;
+            const nx = pr.vx / l;
+            const ny = pr.vy / l;
+            c.vx += nx * base * 0.6;
+            c.vy += ny * base * 0.3;
+            if (c.vx > 600) c.vx = 600;
+            else if (c.vx < -600) c.vx = -600;
+            if (c.vy > 600) c.vy = 600;
+            else if (c.vy < -600) c.vy = -600;
+            dead = true;
+            break;
+          }
         }
       }
       if (hitSolid && !dead) {
@@ -1065,27 +1012,123 @@ export class Match {
   }
 
   private stepCrates(dt: number): void {
-    const solids = this.solids().filter((s) => s.type !== undefined || true);
+    // Static solids WITHOUT crates (platforms/movers/rotators). Crate-vs-crate
+    // is resolved explicitly below so stacked boxes (e.g. Chandelier's pyramid)
+    // land on each other instead of falling through.
+    const statics = this.solids(false);
+    const overlaps = (
+      a: { x: number; y: number; w: number; h: number },
+      b: { x: number; y: number; w: number; h: number },
+    ): boolean =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
     for (const c of this.crates) {
       c.vy = Math.min(MAX_FALL, c.vy + GRAVITY * 0.7 * dt);
       c.x += c.vx * dt;
       c.vx *= 1 - Math.min(1, 3 * dt);
+      if (c.x < 0) { c.x = 0; c.vx = 0; }
+      if (c.x + c.w > WORLD_W) { c.x = WORLD_W - c.w; c.vx = 0; }
       c.y += c.vy * dt;
-      for (const s of solids) {
-        if (s.w === c.w && s.h === c.h) continue; // skip self-ish (crates are in solids list)
-        if (c.x < s.x + s.w && c.x + c.w > s.x && c.y < s.y + s.h && c.y + c.h > s.y) {
-          if (c.vy > 0 && c.y + c.h - s.y < 24) {
+      for (const s of statics) {
+        if (!overlaps(c, s)) continue;
+        if (c.vy >= 0 && c.y < s.y && c.y + c.h - s.y < 24) {
+          c.y = s.y - c.h;
+          c.vy = 0;
+        } else {
+          const ox = Math.min(c.x + c.w, s.x + s.w) - Math.max(c.x, s.x);
+          const oy = Math.min(c.y + c.h, s.y + s.h) - Math.max(c.y, s.y);
+          if (ox < oy) {
+            if (c.x + c.w / 2 < s.x + s.w / 2) c.x = s.x - c.w;
+            else c.x = s.x + s.w;
+            c.vx = 0;
+          } else if (c.y + c.h / 2 < s.y + s.h / 2) {
             c.y = s.y - c.h;
             c.vy = 0;
-          } else if (c.vy < 0) {
+          } else {
             c.y = s.y + s.h;
-            c.vy = 0;
+            if (c.vy < 0) c.vy = 0;
           }
         }
       }
       if (c.y > WORLD_H + 200) {
         c.y = -40; c.vy = 0;
       }
+    }
+    // Crate-on-crate stacking: several passes so a pyramid settles. Only the
+    // UPPER crate moves (lands on the lower one); the lower crate never gets
+    // pushed down, otherwise the bottom dodges and the top falls through.
+    // Same-level overlaps resolve horizontally so side-by-side boxes separate.
+    for (let pass = 0; pass < 3; pass++) {
+      let moved = false;
+      for (let i = 0; i < this.crates.length; i++) {
+        const c = this.crates[i];
+        for (let j = 0; j < this.crates.length; j++) {
+          if (i === j) continue;
+          const o = this.crates[j];
+          if (!overlaps(c, o)) continue;
+          const cMidY = c.y + c.h / 2;
+          const oMidY = o.y + o.h / 2;
+          if (cMidY < oMidY - 1) {
+            // c is above o: land on top (or push sideways on a graze).
+            const xOverlap = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+            if (c.vy >= 0 && xOverlap > 8) {
+              const ny = o.y - c.h;
+              if (Math.abs(ny - c.y) > 0.01) moved = true;
+              c.y = ny;
+              c.vy = 0;
+            } else if (c.y < o.y && c.y + c.h - o.y < 24 && c.vy >= 0) {
+              const ny = o.y - c.h;
+              if (Math.abs(ny - c.y) > 0.01) moved = true;
+              c.y = ny;
+              c.vy = 0;
+            } else {
+              const ox = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+              const oy = Math.min(c.y + c.h, o.y + o.h) - Math.max(c.y, o.y);
+              if (ox < oy) {
+                if (c.x + c.w / 2 < o.x + o.w / 2) c.x = o.x - c.w;
+                else c.x = o.x + o.w;
+                c.vx = 0;
+                moved = true;
+              } else {
+                c.y = o.y - c.h;
+                c.vy = 0;
+                moved = true;
+              }
+            }
+          } else if (cMidY > oMidY + 1) {
+            // c is below o (o rests on c): leave c alone, o's pass lands it.
+            continue;
+          } else {
+            // Same level: separate along the minimal axis (side-by-side).
+            const ox = Math.min(c.x + c.w, o.x + o.w) - Math.max(c.x, o.x);
+            const oy = Math.min(c.y + c.h, o.y + o.h) - Math.max(c.y, o.y);
+            if (ox < oy) {
+              if (c.x + c.w / 2 < o.x + o.w / 2) c.x = o.x - c.w;
+              else c.x = o.x + o.w;
+              c.vx = 0;
+              moved = true;
+            } else if (c.y + c.h / 2 < o.y + o.h / 2) {
+              c.y = o.y - c.h;
+              c.vy = 0;
+              moved = true;
+            } else if (c.y + c.h / 2 > o.y + o.h / 2) {
+              continue;
+            } else if (c.x + c.w / 2 < o.x + o.w / 2) {
+              c.x = o.x - c.w;
+              c.vx = 0;
+              moved = true;
+            } else {
+              c.x = o.x + o.w;
+              c.vx = 0;
+              moved = true;
+            }
+          }
+        }
+      }
+      if (!moved) break;
+    }
+    for (const c of this.crates) {
+      if (c.x < 0) { c.x = 0; c.vx = 0; }
+      if (c.x + c.w > WORLD_W) { c.x = WORLD_W - c.w; c.vx = 0; }
     }
   }
 
@@ -1175,23 +1218,6 @@ export class Match {
       return;
     }
     if (this.players.length < 2) return;
-    // Boss survive timer: boss alive for 45s wins the round.
-    if (this.bossId !== null && this.resetTimer < 0) {
-      const boss = this.players.find((p) => p.id === this.bossId);
-      if (boss && boss.alive) {
-        this.bossTime += dt;
-        if (this.bossTime >= BOSS_SURVIVE_TIME) {
-          this.wins[boss.id] = (this.wins[boss.id] ?? 0) + 1;
-          boss.wins = this.wins[boss.id];
-          this.events.push({ kind: "roundEnd", text: `${boss.name} SURVIVES (${this.wins[boss.id]}/${this.winScore})`, a: boss.id, b: this.round });
-          if (this.wins[boss.id] >= this.winScore) {
-            this.events.push({ kind: "matchEnd", text: boss.name, a: boss.id });
-          }
-          this.resetTimer = 1.5;
-          return;
-        }
-      }
-    }
     const alive = this.players.filter((p) => p.alive);
     if (alive.length <= 1 && this.time > 0.5) {
       const winner = alive[0];
@@ -1224,8 +1250,8 @@ export class Match {
         target = q;
       }
     }
-    // prefer a nearby gun when unarmed (boss stays fists-only)
-    if (p.weapon === "fists" && !p.boss) {
+    // prefer a nearby gun when unarmed
+    if (p.weapon === "fists") {
       let bd = 260;
       for (const d of this.drops) {
         const dd = Math.hypot(d.x - p.x, d.y - p.y);
@@ -1247,11 +1273,6 @@ export class Match {
     const melee = WEAPONS[p.weapon].melee;
     if (melee) inp.fire = dist < melee.range + 10;
     else if (p.ammo > 0) inp.fire = dist < 700 && Math.random() < 0.75;
-    // Boss bot: stomp when a foe is close.
-    if (p.boss && dist < BOSS_STOMP_RADIUS + 10 && (this.stompCd.get(p.id) ?? 0) <= 0) {
-      inp.down = true;
-      inp.fire = true;
-    }
     // Bots wall-jump when sliding (sliding flag is refreshed each tick in movePlayer).
     if ((p as any).sliding && (this.wallLocks.get(p.id) ?? 0) <= 0) inp.jump = true;
     return inp;

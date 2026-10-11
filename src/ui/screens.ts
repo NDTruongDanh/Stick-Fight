@@ -442,7 +442,8 @@ export class Ui {
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-4">HOST — CREATE ROOM</h2>
       <div class="flex flex-col gap-3">
         <label class="text-sm text-neutral-300">Fighter name
-          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="PLAYER1" value="PLAYER1" />
+          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="Enter your name" value="" autocomplete="off" spellcheck="false" />
+          <span id="s-name-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
         </label>
         <label class="text-sm text-neutral-300">Room server address
           <input id="s-server" class="${INPUT} mt-1 font-mono" value="ws://${esc(lanWsHint())}" />
@@ -469,8 +470,10 @@ export class Ui {
     const name = this.screen.querySelector<HTMLInputElement>('#s-name');
     const server = this.screen.querySelector<HTMLInputElement>('#s-server');
     const serverErr = this.screen.querySelector<HTMLElement>('#s-server-err');
+    const nameErr = this.screen.querySelector<HTMLElement>('#s-name-err');
     const level = this.screen.querySelector<HTMLSelectElement>('#s-level');
-    name?.select();
+    name?.focus();
+    name?.addEventListener('input', () => nameErr?.classList.add('hidden'));
     level?.addEventListener('change', () => {
       state.levelId = level.value;
     });
@@ -501,7 +504,16 @@ export class Ui {
       });
     }
     const go = () => {
-      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      const rawName = (name?.value || '').trim().toUpperCase().slice(0, 12);
+      if (!rawName) {
+        if (nameErr) {
+          nameErr.textContent = 'Enter your fighter name before creating a room';
+          nameErr.classList.remove('hidden');
+        }
+        this.toast('Enter your fighter name before creating a room');
+        name?.focus();
+        return;
+      }
       const url = normalizeWsUrl(server?.value || '');
       if (!url) {
         if (serverErr) {
@@ -527,7 +539,8 @@ export class Ui {
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-4">JOIN — ROOM CODE</h2>
       <div class="flex flex-col gap-3">
         <label class="text-sm text-neutral-300">Fighter name
-          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="PLAYER1" value="PLAYER1" />
+          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="Enter your name" value="" autocomplete="off" spellcheck="false" />
+          <span id="s-name-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
         </label>
         <label class="text-sm text-neutral-300">Room code
           <input id="s-code" class="${INPUT} mt-1 font-mono uppercase tracking-[0.3em] text-center !text-xl font-bold" maxlength="6" placeholder="AB12" autocomplete="off" spellcheck="false" />
@@ -550,13 +563,15 @@ export class Ui {
     const name = this.screen.querySelector<HTMLInputElement>('#s-name');
     const server = this.screen.querySelector<HTMLInputElement>('#s-server');
     const code = this.screen.querySelector<HTMLInputElement>('#s-code');
+    const nameErr = this.screen.querySelector<HTMLElement>('#s-name-err');
     const serverErr = this.screen.querySelector<HTMLElement>('#s-server-err');
     const codeErr = this.screen.querySelector<HTMLElement>('#s-code-err');
     const status = this.screen.querySelector<HTMLElement>('#s-status');
     const goBtn = this.screen.querySelector<HTMLButtonElement>('#s-go');
     const manualBtn = this.screen.querySelector<HTMLButtonElement>('#s-manual');
     const backBtn = this.screen.querySelector<HTMLButtonElement>('#s-back');
-    name?.select();
+    name?.focus();
+    name?.addEventListener('input', () => nameErr?.classList.add('hidden'));
     code?.addEventListener('input', () => {
       if (code.value) code.value = code.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
     });
@@ -596,8 +611,23 @@ export class Ui {
       this.toast(msg);
       code?.focus();
     };
+    const failName = (): boolean => {
+      const v = (name?.value || '').trim();
+      if (v) {
+        nameErr?.classList.add('hidden');
+        return false;
+      }
+      if (nameErr) {
+        nameErr.textContent = 'Enter your fighter name before joining a room';
+        nameErr.classList.remove('hidden');
+      }
+      this.toast('Enter your fighter name before joining a room');
+      name?.focus();
+      return true;
+    };
     const goAuto = (): void => {
-      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      if (failName()) return;
+      const rawName = (name?.value || '').trim().toUpperCase().slice(0, 12);
       const roomCode = normalizeRoomCode(code?.value || '');
       if (!roomCode) {
         failCode('Enter the 4-letter room code from the host');
@@ -645,7 +675,8 @@ export class Ui {
         });
     };
     const goManual = (): void => {
-      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      if (failName()) return;
+      const rawName = (name?.value || '').trim().toUpperCase().slice(0, 12);
       const url = normalizeWsUrl(server?.value || '');
       if (!url) {
         if (serverErr) {
@@ -693,7 +724,8 @@ export class Ui {
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-4">${esc(titleText)}</h2>
       <div class="flex flex-col gap-3">
         <label class="text-sm text-neutral-300">Fighter name
-          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="PLAYER1" value="PLAYER1" />
+          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="Enter your name" value="" autocomplete="off" spellcheck="false" />
+          <span id="s-name-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
         </label>
         ${
           opts.ip
@@ -717,9 +749,20 @@ export class Ui {
     const name = this.screen.querySelector<HTMLInputElement>('#s-name');
     const ip = this.screen.querySelector<HTMLInputElement>('#s-ip');
     const ipErr = this.screen.querySelector<HTMLElement>('#s-ip-err');
-    name?.select();
+    const nameErr = this.screen.querySelector<HTMLElement>('#s-name-err');
+    name?.focus();
+    name?.addEventListener('input', () => nameErr?.classList.add('hidden'));
     const go = () => {
-      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      const rawName = (name?.value || '').trim().toUpperCase().slice(0, 12);
+      if (!rawName) {
+        if (nameErr) {
+          nameErr.textContent = 'Enter your fighter name before continuing';
+          nameErr.classList.remove('hidden');
+        }
+        this.toast('Enter your fighter name before continuing');
+        name?.focus();
+        return;
+      }
       if (opts.ip) {
         const url = normalizeWsUrl(ip?.value || '');
         if (!url) {
