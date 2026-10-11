@@ -110,6 +110,36 @@ export interface LobbyPlayer {
   slot?: number;
   /** True for the local player. */
   isSelf?: boolean;
+  /** True for the room host. */
+  isHost?: boolean;
+}
+
+/**
+ * Normalize a user-typed room code to uppercase alphanumeric.
+ * Accepts 4–6 chars (server issues 4-letter codes). Returns null when invalid.
+ */
+export function normalizeRoomCode(raw: string): string | null {
+  const s = (raw || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (s.length < 4 || s.length > 6) return null;
+  if (!/^[A-Z0-9]+$/.test(s)) return null;
+  return s;
+}
+
+export interface CreateRoomData {
+  name: string;
+  serverUrl: string;
+  wins: number;
+  bots: boolean;
+  levelId: string;
+  levelJson?: string;
+  back?: boolean;
+}
+
+export interface JoinRoomData {
+  name: string;
+  serverUrl: string;
+  code: string;
+  back?: boolean;
 }
 
 export interface EditorHandlers {
@@ -134,14 +164,19 @@ function editorErrorsHTML(errors: string[]): string {
 
 export interface LobbyInfo {
   title: string;
+  /** Short room code (4 letters) — shown big for sharing. */
+  code?: string;
   addr?: string;
   players: LobbyPlayer[];
+  /** True when the local player is the room host (shows DELETE). */
+  isHost?: boolean;
   /** Optional footer line. Rendered as plain text. */
   hint?: string;
 }
 
 export interface LobbyHandlers {
   onLeave(): void;
+  onDelete?(): void;
 }
 
 export function esc(s: string): string {
@@ -260,7 +295,7 @@ function footerHTML(): string {
   } catch {
     host = '';
   }
-  const ipHint = host ? ` · LAN: friends join <span class="font-mono text-green-300">ws://${esc(lanWsHint())}</span>` : '';
+  const ipHint = host ? ` · LAN room server <span class="font-mono text-green-300">ws://${esc(lanWsHint())}</span> — HOST creates a room, friends JOIN with the code` : '';
   return `<p class="text-center text-[11px] text-neutral-500 mt-4">clone for LAN parties · <span data-wins-note>first to ${getWinsTarget()} wins takes the match</span>${ipHint}</p>
     <p class="text-center text-[11px] text-neutral-600 mt-1">press <span class="font-mono text-neutral-400">H</span> in-game to toggle this help</p>`;
 }
@@ -275,7 +310,7 @@ function lobbyChipsHTML(players: LobbyPlayer[]): string {
       const badge = p.bot
         ? `<span class="ml-auto text-[11px] px-2 py-0.5 rounded bg-purple-700 text-purple-100">BOT</span>`
         : '';
-      const tags = `${p.isSelf ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-blue-700 text-blue-50">YOU</span>` : ''}`;
+      const tags = `${p.isSelf ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-blue-700 text-blue-50">YOU</span>` : ''}${p.isHost ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-yellow-600 text-black font-bold">HOST</span>` : ''}`;
       return `<div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-800 border ${p.isSelf ? 'border-blue-600' : 'border-neutral-700'}">
         <span class="w-4 h-4 rounded-full shrink-0" style="background:${p.color}"></span>
         <span class="font-bold text-sm">${esc(p.name)}</span>${tags ? `<span class="flex gap-1">${tags}</span>` : ''}${badge}</div>`;
@@ -360,6 +395,154 @@ export class Ui {
     (q('#m-editor') as HTMLButtonElement).onclick = () => cb.onEditor();
   }
 
+  showCreateRoom(cb: (d: CreateRoomData) => void): void {
+    const state = { wins: getWinsTarget(), bots: false, levelId: LEVELS[0]?.id ?? 'woods1' };
+    let customJson: string | null = null;
+    const levelOpts = LEVELS.map(
+      (l) => `<option value="${esc(l.id)}"${l.id === state.levelId ? ' selected' : ''}>${esc(l.name)}</option>`,
+    ).join('');
+    this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-4">HOST — CREATE ROOM</h2>
+      <div class="flex flex-col gap-3">
+        <label class="text-sm text-neutral-300">Fighter name
+          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="PLAYER1" value="PLAYER1" />
+        </label>
+        <label class="text-sm text-neutral-300">Room server address
+          <input id="s-server" class="${INPUT} mt-1 font-mono" value="ws://${esc(lanWsHint())}" />
+          <span class="block text-[11px] text-neutral-500 mt-1">the LAN game server (any machine on your network runs <span class="font-mono text-neutral-300">npm run host</span>). Same Wi-Fi, use its LAN IP.</span>
+          <span id="s-server-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
+        </label>
+        <label class="text-sm text-neutral-300">Arena
+          <select id="s-level" class="${INPUT} mt-1">${levelOpts}</select>
+        </label>
+        ${winsHTML(state.wins)}
+        ${botToggleHTML(state.bots)}
+        <div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
+          <span class="font-bold text-neutral-200">Custom map (optional)</span><br />
+          <span class="text-neutral-400">Upload an editor JSON — it is sent to the server with your room. Joiners receive it automatically.</span>
+          <input id="s-custom-file" type="file" accept=".json,application/json"
+            class="mt-2 block w-full text-[12px] text-neutral-400 file:mr-2 file:px-3 file:py-1 file:rounded file:border file:border-neutral-900 file:bg-neutral-700 file:text-neutral-100" />
+          <span id="s-custom-status" class="block mt-1 text-neutral-500">no custom map — using arena above</span>
+        </div>
+        <button id="s-go" class="${BTN_YELLOW} mt-1">CREATE ROOM</button>
+        <button id="s-back" class="${BTN_GHOST}">BACK</button>
+      </div>`);
+    wireBotToggle(this.screen, state as { bots: boolean });
+    wireWins(this.screen, state as { wins: number });
+    const name = this.screen.querySelector<HTMLInputElement>('#s-name');
+    const server = this.screen.querySelector<HTMLInputElement>('#s-server');
+    const serverErr = this.screen.querySelector<HTMLElement>('#s-server-err');
+    const level = this.screen.querySelector<HTMLSelectElement>('#s-level');
+    name?.select();
+    level?.addEventListener('change', () => {
+      state.levelId = level.value;
+    });
+    const customFile = this.screen.querySelector<HTMLInputElement>('#s-custom-file');
+    const customStatus = this.screen.querySelector<HTMLElement>('#s-custom-status');
+    if (customFile && customStatus) {
+      customFile.addEventListener('change', () => {
+        const f = customFile.files?.[0];
+        if (!f) {
+          customJson = null;
+          customStatus.textContent = 'no custom map — using arena above';
+          customStatus.className = 'block mt-1 text-neutral-500';
+          return;
+        }
+        void f.text().then((text) => {
+          try {
+            importLevel(text); // full editor validation
+            customJson = text;
+            customStatus.textContent = `custom map ready: ${f.name} — sent with your room`;
+            customStatus.className = 'block mt-1 text-green-300';
+            this.toast('Custom map validated — it will be sent with your room');
+          } catch (err) {
+            customJson = null;
+            customStatus.textContent = err instanceof Error ? err.message.split('\n')[0] : String(err);
+            customStatus.className = 'block mt-1 text-red-300';
+          }
+        });
+      });
+    }
+    const go = () => {
+      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      const url = normalizeWsUrl(server?.value || '');
+      if (!url) {
+        if (serverErr) {
+          serverErr.textContent = 'Enter a valid address, e.g. ws://192.168.1.10:8080';
+          serverErr.classList.remove('hidden');
+        }
+        this.toast('Enter a valid server address, e.g. ws://192.168.1.10:8080');
+        server?.focus();
+        return;
+      }
+      cb({
+        name: rawName, serverUrl: url, wins: state.wins,
+        bots: state.bots, levelId: state.levelId,
+        ...(customJson ? { levelJson: customJson } : {}),
+      });
+    };
+    (this.screen.querySelector('#s-go') as HTMLButtonElement).onclick = go;
+    (this.screen.querySelector('#s-back') as HTMLButtonElement).onclick = () =>
+      cb({ name: '', serverUrl: '', wins: state.wins, bots: false, levelId: state.levelId, back: true });
+  }
+
+  showJoinRoom(cb: (d: JoinRoomData) => void): void {
+    this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-4">JOIN — ROOM CODE</h2>
+      <div class="flex flex-col gap-3">
+        <label class="text-sm text-neutral-300">Fighter name
+          <input id="s-name" class="${INPUT} mt-1" maxlength="12" placeholder="PLAYER1" value="PLAYER1" />
+        </label>
+        <label class="text-sm text-neutral-300">Room server address
+          <input id="s-server" class="${INPUT} mt-1 font-mono" value="ws://${esc(lanWsHint())}" />
+          <span class="block text-[11px] text-neutral-500 mt-1">same server the host used (ask the host for the address if this fails).</span>
+          <span id="s-server-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
+        </label>
+        <label class="text-sm text-neutral-300">Room code
+          <input id="s-code" class="${INPUT} mt-1 font-mono uppercase tracking-[0.3em] text-center !text-xl font-bold" maxlength="6" placeholder="AB12" autocomplete="off" spellcheck="false" />
+          <span class="block text-[11px] text-neutral-500 mt-1">4-letter code from the host (e.g. <span class="font-mono text-neutral-300">AB12</span>).</span>
+          <span id="s-code-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
+        </label>
+        <button id="s-go" class="${BTN_YELLOW} mt-1">JOIN ROOM</button>
+        <button id="s-back" class="${BTN_GHOST}">BACK</button>
+      </div>`);
+    const name = this.screen.querySelector<HTMLInputElement>('#s-name');
+    const server = this.screen.querySelector<HTMLInputElement>('#s-server');
+    const code = this.screen.querySelector<HTMLInputElement>('#s-code');
+    const serverErr = this.screen.querySelector<HTMLElement>('#s-server-err');
+    const codeErr = this.screen.querySelector<HTMLElement>('#s-code-err');
+    name?.select();
+    code?.addEventListener('input', () => {
+      if (code.value) code.value = code.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+    });
+    const go = () => {
+      const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
+      const url = normalizeWsUrl(server?.value || '');
+      if (!url) {
+        if (serverErr) {
+          serverErr.textContent = 'Enter a valid address, e.g. ws://192.168.1.10:8080';
+          serverErr.classList.remove('hidden');
+        }
+        this.toast('Enter a valid server address, e.g. ws://192.168.1.10:8080');
+        server?.focus();
+        return;
+      }
+      const roomCode = normalizeRoomCode(code?.value || '');
+      if (!roomCode) {
+        if (codeErr) {
+          codeErr.textContent = 'Enter the 4-letter room code from the host';
+          codeErr.classList.remove('hidden');
+        }
+        this.toast('Enter the 4-letter room code from the host');
+        code?.focus();
+        return;
+      }
+      cb({ name: rawName, serverUrl: url, code: roomCode });
+    };
+    (this.screen.querySelector('#s-go') as HTMLButtonElement).onclick = go;
+    (this.screen.querySelector('#s-back') as HTMLButtonElement).onclick = () =>
+      cb({ name: '', serverUrl: '', code: '', back: true });
+  }
+
+  /** Legacy setup (local-only flows). Kept for compat; online uses create/join above. */
   showSetup(titleText: string, cb: (d: SetupData) => void, opts: SetupOpts = {}): void {
     const state = { humans: 2, bots: true };
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-4">${esc(titleText)}</h2>
@@ -377,24 +560,6 @@ export class Ui {
             : ''
         }
         ${
-          !opts.ip && !opts.local
-            ? `<div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
-                 Friends join at <span class="font-mono text-green-300">ws://${esc(lanWsHint())}</span><br />
-                 <span class="text-neutral-400">On the host PC first run <span class="font-mono text-green-300">npm run host</span>, then press START below.</span>
-               </div>
-               <div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
-                 <span class="font-bold text-neutral-200">Custom map (optional)</span><br />
-                 <span class="text-neutral-400">Pick an editor JSON file to validate it here, then start the server with
-                 <span class="font-mono text-green-300">npm run host -- --level-file &lt;file&gt;</span>.
-                 Joining players receive the map automatically. (The browser cannot inject a file
-                 into the server process — the CLI flag is required.)</span>
-                 <input id="s-custom-file" type="file" accept=".json,application/json"
-                   class="mt-2 block w-full text-[12px] text-neutral-400 file:mr-2 file:px-3 file:py-1 file:rounded file:border file:border-neutral-900 file:bg-neutral-700 file:text-neutral-100" />
-                 <span id="s-custom-status" class="block mt-1 text-neutral-500"></span>
-                </div>`
-            : ''
-        }
-        ${
           opts.local
             ? `${stepperHTML('humans', 'Humans', 1, 4, state.humans)}${botToggleHTML(state.bots)}`
             : ''
@@ -408,43 +573,6 @@ export class Ui {
     const ip = this.screen.querySelector<HTMLInputElement>('#s-ip');
     const ipErr = this.screen.querySelector<HTMLElement>('#s-ip-err');
     name?.select();
-    // Host-only custom-map picker: validates a level JSON file locally and
-    // stages it for copy-paste. The browser cannot feed it to the node server
-    // process — the host must pass it via --level-file (see instructions).
-    const customFile = this.screen.querySelector<HTMLInputElement>('#s-custom-file');
-    const customStatus = this.screen.querySelector<HTMLElement>('#s-custom-status');
-    if (customFile && customStatus) {
-      try {
-        const stagedName = localStorage.getItem('sf_host_custom_name');
-        if (stagedName && localStorage.getItem('sf_host_custom')) {
-          customStatus.textContent = `custom map ready — start server with --level-file ${stagedName}`;
-          customStatus.className = 'block mt-1 text-green-300';
-        }
-      } catch {
-        /* storage unavailable — ignore */
-      }
-      customFile.addEventListener('change', () => {
-        const f = customFile.files?.[0];
-        if (!f) return;
-        void f.text().then((text) => {
-          try {
-            importLevel(text); // full editor validation
-            try {
-              localStorage.setItem('sf_host_custom', text);
-              localStorage.setItem('sf_host_custom_name', f.name);
-            } catch {
-              /* storage unavailable — validation result still shown */
-            }
-            customStatus.textContent = `custom map ready — start server with --level-file ${f.name}`;
-            customStatus.className = 'block mt-1 text-green-300';
-            this.toast('Custom map validated — pass it to the server via --level-file');
-          } catch (err) {
-            customStatus.textContent = err instanceof Error ? err.message.split('\n')[0] : String(err);
-            customStatus.className = 'block mt-1 text-red-300';
-          }
-        });
-      });
-    }
     const go = () => {
       const rawName = (name?.value || 'PLAYER').toUpperCase().slice(0, 12);
       if (opts.ip) {
@@ -471,11 +599,20 @@ export class Ui {
   showLobby(info: LobbyInfo, cb: LobbyHandlers): void {
     this.shell(`<h2 class="font-display text-3xl text-center text-yellow-300 text-stroke mb-1">${esc(info.title)}</h2>
       ${
+        info.code
+          ? `<div class="text-center mb-1">
+               <div class="text-[11px] tracking-[0.25em] text-neutral-400 font-bold">ROOM CODE</div>
+               <div class="font-mono font-bold text-4xl tracking-[0.2em] text-yellow-300 select-all">${esc(info.code)}</div>
+               <div class="text-[11px] text-neutral-500 mt-0.5">share this code — friends JOIN with it</div>
+             </div>`
+          : `<div class="mb-1"></div>`
+      }
+      ${
         info.addr
           ? `<p class="text-center text-sm text-neutral-300 mb-1">Server: <span class="font-mono text-green-300">${esc(
               info.addr,
             )}</span></p>`
-          : `<div class="mb-1"></div>`
+          : ``
       }
       <p id="lobby-count" class="text-center text-[12px] text-neutral-400 mb-2">${esc(lobbyCountText(info.players))}</p>
       <div id="lobby-players" class="flex flex-col gap-2 mb-4">${lobbyChipsHTML(info.players)}</div>
@@ -485,9 +622,12 @@ export class Ui {
           : ''
       }
       <div class="flex flex-col gap-2.5">
-        <button id="l-leave" class="${BTN_GHOST}">LEAVE</button>
+        ${info.isHost ? `<button id="l-delete" class="${BTN_RED} !text-base">DELETE ROOM</button>` : ''}
+        <button id="l-leave" class="${BTN_GHOST}">${info.isHost ? 'QUIT (DELETES ROOM)' : 'LEAVE'}</button>
       </div>`);
     (this.screen.querySelector('#l-leave') as HTMLButtonElement).onclick = () => cb.onLeave();
+    const del = this.screen.querySelector<HTMLButtonElement>('#l-delete');
+    if (del) del.onclick = () => cb.onDelete?.() ?? cb.onLeave();
   }
 
   /**

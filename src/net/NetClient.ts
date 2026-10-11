@@ -5,6 +5,7 @@ export type SnapshotMsg = Extract<ServerMsg, { t: "snapshot" }>;
 export type RosterMsg = Extract<ServerMsg, { t: "roster" }>;
 export type StartMsg = Extract<ServerMsg, { t: "start" }>;
 export type WelcomeMsg = Extract<ServerMsg, { t: "welcome" }>;
+export type RoomClosedMsg = Extract<ServerMsg, { t: "roomClosed" }>;
 /** Roster entry from the host broadcast. */
 export type RosterPlayer = RosterMsg["players"][number];
 
@@ -21,12 +22,31 @@ export interface InputPayload {
   aimY: number;
 }
 
+export interface CreateRoomOpts {
+  wins?: number;
+  bots?: number;
+  levelId?: string;
+  levelJson?: string;
+}
+
+/**
+ * Room-aware LAN client (protocol v2).
+ *
+ * One socket == one room visit: createRoom() makes you the host, joinRoom()
+ * joins via code. deleteRoom() (host only) closes the room; roomClosed means
+ * kicked/deleted (fatal, no retry). Unexpected drops are fatal too — the
+ * caller returns to the menu (no auto-reconnect: a host drop deletes the
+ * room, so retrying would need a new code anyway).
+ */
 export class NetClient {
   clientId = -1;
   slot = -1;
   levelId = "";
+  roomCode = "";
+  isHost = false;
+  hostId = -1;
   pingMs = 0;
-  /** Raw host-provided custom level JSON (LAN --level-file), if any. */
+  /** Raw host-provided custom level JSON, if any. */
   customLevel: string | null = null;
 
   onSnapshot: (s: SnapshotMsg) => void = () => {};
@@ -34,39 +54,62 @@ export class NetClient {
   onStart: (s: StartMsg) => void = () => {};
   onWelcome: (w: WelcomeMsg) => void = () => {};
   onMatchEnd: (wins: Record<number, number>) => void = () => {};
+  onRoomClosed: (reason: string, code: string) => void = () => {};
   onClose: () => void = () => {};
 
   private ws: WebSocket | null = null;
   private url = "";
   private name = "";
-  /** Last connection failure (reject reason / error / drop). Null while connected. */
+  private pendingCreate: CreateRoomOpts | null = null;
+  private pendingJoinCode: string | null = null;
+  /** Last connection failure (reject reason / roomClosed / drop). Null while connected. */
   lastError: string | null = null;
-  /** Consecutive auto-reconnect attempts for the current outage. */
+  /** Kept for HUD compat — room mode never auto-reconnects, always 0. */
   reconnectAttempts = 0;
-  /** Fires on each scheduled auto-reconnect with the 1-based attempt number. */
+  /** Fires when the server closes our room (kicked / deleted). */
   onReconnect: (attempt: number) => void = () => {};
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private maxReconnectAttempts = 5;
-  private reconnectBaseMs = 1000;
-  /** Last close followed a server reject (full/version) — do not retry. */
-  private rejectFatal = false;
+  /** Last close followed a fatal message (reject/roomClosed) — informational only. */
+  private fatalClose = false;
   private manualClose = false;
   private connectResolve: (() => void) | null = null;
   private connectReject: ((e: Error) => void) | null = null;
 
-  connect(url: string, name: string): Promise<void> {
+  createRoom(url: string, name: string, opts: CreateRoomOpts = {}): Promise<void> {
     this.url = url;
     this.name = name;
+    this.pendingCreate = { ...opts };
+    this.pendingJoinCode = null;
+    return this.dial();
+  }
+
+  joinRoom(url: string, code: string, name: string): Promise<void> {
+    this.url = url;
+    this.name = name;
+    this.pendingJoinCode = code.trim().toUpperCase();
+    this.pendingCreate = null;
+    return this.dial();
+  }
+
+  /** Back-compat: old hello flow is gone — use createRoom/joinRoom. */
+  connect(): Promise<void> {
+    return Promise.reject(new Error("use createRoom() or joinRoom()"));
+  }
+
+  private dial(): Promise<void> {
     this.manualClose = false;
     this.lastError = null;
     this.reconnectAttempts = 0;
-    this.rejectFatal = false;
+    this.fatalClose = false;
+    this.clientId = -1;
+    this.slot = -1;
+    this.roomCode = "";
+    this.isHost = false;
+    this.hostId = -1;
     return new Promise<void>((resolve, reject) => {
       this.connectResolve = resolve;
       this.connectReject = reject;
       this.open();
-      // Safety timeout: reject if no welcome arrives.
       setTimeout(() => {
         if (this.clientId < 0 && this.connectReject) {
           const rej = this.connectReject;
@@ -83,8 +126,23 @@ export class NetClient {
     const ws = new WebSocket(this.url);
     this.ws = ws;
     ws.onopen = () => {
-      const hello: ClientMsg = { v: PROTOCOL_VERSION, t: "hello", name: this.name, version: PROTOCOL_VERSION };
-      ws.send(JSON.stringify(hello));
+      let msg: ClientMsg;
+      if (this.pendingCreate) {
+        msg = {
+          v: PROTOCOL_VERSION, t: "createRoom",
+          name: this.name, version: PROTOCOL_VERSION,
+          ...(this.pendingCreate.wins !== undefined ? { wins: this.pendingCreate.wins } : {}),
+          ...(this.pendingCreate.bots !== undefined ? { bots: this.pendingCreate.bots } : {}),
+          ...(this.pendingCreate.levelId ? { levelId: this.pendingCreate.levelId } : {}),
+          ...(this.pendingCreate.levelJson ? { levelJson: this.pendingCreate.levelJson } : {}),
+        };
+      } else {
+        msg = {
+          v: PROTOCOL_VERSION, t: "joinRoom",
+          code: this.pendingJoinCode ?? "", name: this.name, version: PROTOCOL_VERSION,
+        };
+      }
+      ws.send(JSON.stringify(msg));
       this.startPing();
     };
     ws.onmessage = (ev) => this.handle(String(ev.data));
@@ -93,32 +151,16 @@ export class NetClient {
       try {
         this.onClose();
       } catch {
-        /* listener error — still schedule reconnect below */
+        /* listener error */
       }
-      // No retry after a deliberate close or a fatal reject (full/version).
-      if (this.manualClose || this.rejectFatal) {
-        this.rejectFatal = false;
+      if (this.manualClose || this.fatalClose) {
         if (!this.manualClose && !this.lastError) this.lastError = "disconnected";
         return;
       }
-      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-        this.lastError = "connection lost (reconnects exhausted)";
-        return;
-      }
-      // Exponential backoff: 1s, 2s, 4s, … capped at 10s.
-      this.reconnectAttempts++;
-      const delay = Math.min(10000, this.reconnectBaseMs * 2 ** (this.reconnectAttempts - 1));
-      this.lastError = "connection lost — retrying…";
-      const attempt = this.reconnectAttempts;
-      try {
-        this.onReconnect(attempt);
-      } catch {
-        /* ignore listener errors */
-      }
-      this.reconnectTimer = setTimeout(() => this.open(), delay);
+      // Unexpected drop: fatal in room mode (no auto-reconnect).
+      if (!this.lastError) this.lastError = "connection lost";
     };
     ws.onerror = () => {
-      // Errors surface via onclose; if we never got welcome, reject connect().
       if (this.clientId < 0) this.lastError = "websocket error";
       if (this.clientId < 0 && this.connectReject) {
         const rej = this.connectReject;
@@ -127,6 +169,14 @@ export class NetClient {
         rej(new Error("websocket error"));
       }
     };
+  }
+
+  /** Host-only: delete the room (kicks everyone, including self). */
+  deleteRoom(): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const msg: ClientMsg = { v: PROTOCOL_VERSION, t: "deleteRoom" };
+    ws.send(JSON.stringify(msg));
   }
 
   sendInput(in_: InputPayload): void {
@@ -138,10 +188,6 @@ export class NetClient {
 
   close(): void {
     this.manualClose = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
     this.stopPing();
     try {
       this.ws?.close();
@@ -152,19 +198,15 @@ export class NetClient {
   }
 
   /**
-   * Manually (re)connect, resetting backoff state. Use after a fatal reject
-   * (e.g. server full) or exhausted auto-retries, e.g. from a retry button.
+   * Manual reconnect: re-dial with the same intent (join reuses the code;
+   * create makes a NEW room with a NEW code).
    */
   reconnect(): void {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
     this.manualClose = false;
-    this.rejectFatal = false;
+    this.fatalClose = false;
     this.reconnectAttempts = 0;
     this.lastError = null;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
     this.open();
   }
 
@@ -198,6 +240,8 @@ export class NetClient {
         this.clientId = msg.clientId;
         this.slot = msg.slot;
         this.levelId = msg.levelId;
+        this.roomCode = msg.code;
+        this.isHost = !!msg.isHost;
         this.lastError = null;
         this.reconnectAttempts = 0;
         this.onWelcome(msg);
@@ -210,8 +254,23 @@ export class NetClient {
         break;
       case "reject":
         this.lastError = msg.reason;
-        // Fatal: the server refused us (full / version) — onclose must not retry.
-        this.rejectFatal = true;
+        this.fatalClose = true;
+        if (this.connectReject) {
+          const rej = this.connectReject;
+          this.connectResolve = null;
+          this.connectReject = null;
+          rej(new Error(msg.reason));
+        }
+        break;
+      case "roomClosed":
+        this.lastError = msg.reason;
+        this.fatalClose = true;
+        try {
+          this.onRoomClosed(msg.reason, msg.code);
+        } catch {
+          /* ignore listener errors */
+        }
+        // Fail a pending connect too (e.g. joined a room that closed instantly).
         if (this.connectReject) {
           const rej = this.connectReject;
           this.connectResolve = null;
@@ -224,6 +283,9 @@ export class NetClient {
         this.onSnapshot(msg);
         break;
       case "roster":
+        this.hostId = msg.hostId;
+        // Keep isHost in sync (host never changes, but stay truthful).
+        if (this.clientId >= 0) this.isHost = msg.hostId === this.clientId;
         this.onRoster(msg);
         break;
       case "start":

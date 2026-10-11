@@ -5,7 +5,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HostServer } from "./HostServer.js";
 import { DEFAULT_PORT, TICK_RATE } from "../shared/constants.js";
-import type { LevelDef } from "../shared/types.js";
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -84,34 +83,14 @@ function sendFile(
 }
 
 const port = Number(arg("port", String(DEFAULT_PORT))) || DEFAULT_PORT;
-const levelId = arg("level", "woods1");
-const winsTarget = Number(arg("wins", "5")) || 5;
-const botCount = Math.max(0, Number(arg("bots", "0")) || 0);
-const levelFile = arg("level-file", "");
+// Room defaults: used when a created room omits the field. Per-room values
+// come from the creating client's createRoom message.
+const defaultLevel = arg("level", "woods1");
+const defaultWins = Number(arg("wins", "5")) || 5;
+const defaultBots = Math.max(0, Number(arg("bots", "0")) || 0);
 const tickHz = Math.max(10, Math.min(120, Math.floor(Number(arg("tick", String(TICK_RATE)))) || TICK_RATE));
 const noStatic = hasFlag("no-static") || hasFlag("no-client") || arg("static", "") === "off";
 const staticDirArg = arg("static-dir", "");
-
-// Custom editor map: loose validation (object with spawns + weaponDrops).
-// Full validation happens client-side via editor validateLevel.
-let customLevel: LevelDef | null = null;
-if (levelFile) {
-  try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(levelFile, "utf8"));
-    const rec = parsed as Record<string, unknown>;
-    const ok =
-      typeof parsed === "object" && parsed !== null &&
-      Array.isArray(rec.spawns) && rec.spawns.length > 0 &&
-      Array.isArray(rec.weaponDrops) && rec.weaponDrops.length > 0;
-    if (!ok) {
-      console.error(`[host] --level-file ${levelFile}: missing spawns/weaponDrops — falling back to --level ${levelId}`);
-    } else {
-      customLevel = parsed as LevelDef;
-    }
-  } catch (err) {
-    console.error(`[host] --level-file ${levelFile}: ${(err as Error).message} — falling back to --level ${levelId}`);
-  }
-}
 
 // Static client dir: --static-dir <dir>, else <repo>/dist (sibling of server/).
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -181,7 +160,7 @@ const httpServer = http.createServer((req, res) => {
   res.end("not found");
 });
 
-const server = new HostServer(port, levelId, winsTarget, botCount, customLevel, tickHz);
+const server = new HostServer(port, defaultLevel, defaultWins, defaultBots, tickHz);
 // Attach WS to the same HTTP server: one port serves the web UI + game WS.
 server.start(httpServer);
 
@@ -194,20 +173,20 @@ httpServer.on("error", (err: NodeJS.ErrnoException) => {
 });
 
 httpServer.listen(port, () => {
-  console.log("=== Stick Fight LAN host ===");
-  if (customLevel) {
-    console.log(`custom level: ${customLevel.name || levelFile}`);
-  }
-  console.log(`level: ${customLevel ? customLevel.id : levelId} · first to ${winsTarget} · bots: ${botCount}`);
-  console.log("lobby: match starts automatically ~3s after 2+ players join");
+  console.log("=== Stick Fight LAN room server ===");
+  console.log(`room defaults: level ${defaultLevel} · first to ${defaultWins} · bots: ${defaultBots}`);
+  console.log("flow: any player creates a room (HOST) -> shares the 4-letter code -> friends JOIN with the code");
+  console.log("lobby: match starts automatically ~3s after 2+ players join a room");
+  console.log("rooms: host DELETE kicks everyone · host quit auto-deletes the room");
   for (const { addr, internal } of lanIPs()) {
     console.log(`  http://${addr}:${port}${internal ? "  (this machine)" : "  <-- open this in a browser"}`);
-    console.log(`  ws://${addr}:${port}${internal ? "  (this machine)" : "  <-- join address for friends"}`);
+    console.log(`  ws://${addr}:${port}${internal ? "  (this machine)" : "  <-- server address for friends"}`);
   }
   if (distExists) {
-    console.log(`client: serving ${distDir} (open the http:// URL above, then HOST or JOIN)`);
+    console.log(`client: serving ${distDir} (open the http:// URL above, then HOST or JOIN with a room code)`);
   }
   console.log("flags: --no-static serves WS only · --static-dir <dir> overrides the client dir");
+  console.log("       --level/--wins/--bots set room defaults (per-room values come from the host client)");
   console.log("Press Ctrl+C to stop.");
 });
 

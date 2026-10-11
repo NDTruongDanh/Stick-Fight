@@ -1,6 +1,6 @@
-# LAN host: web client (dist/) + authoritative WS match server on :8080.
-# One port serves both: open http://<host-ip>:8080 in a browser, then HOST
-# or JOIN with ws://<host-ip>:8080.
+# LAN room server: web client (dist/) + authoritative WS room server on :8080.
+# One port serves both: open http://<server-ip>:8080 in a browser, then HOST
+# a room (share the code) or JOIN with a room code.
 services:
   stickfight:
     build: .

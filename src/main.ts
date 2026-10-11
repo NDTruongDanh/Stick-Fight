@@ -1,5 +1,5 @@
 import './styles.css';
-import { Ui, getWinsTarget, lanWsHint, normalizeWsUrl } from './ui/screens.js';
+import { Ui, getWinsTarget, lanWsHint } from './ui/screens.js';
 import type { HudState } from './ui/hud.js';
 import type { LevelDef } from '../shared/types.js';
 import { blankLevel, exportLevel, loadCustom } from './levels/editor.js';
@@ -29,7 +29,7 @@ app.innerHTML = `
   <div data-footer class="text-center text-[11px] text-neutral-500 select-none">
     <span class="text-neutral-400">WASD move · mouse aim · LMB fire · RMB block · F throw · H help · R rematch · Esc pause · Q quit</span>
     <span class="mx-2 text-neutral-700">|</span>
-    <span>LAN: host <span class="font-mono text-green-400">npm run host</span> then join <span class="font-mono text-green-300">ws://${lanWsHint()}</span></span>
+    <span>LAN rooms: run <span class="font-mono text-green-400">npm run host</span> anywhere, HOST creates a room, friends JOIN with the code (<span class="font-mono text-green-300">ws://${lanWsHint()}</span>)</span>
   </div>`;
 const stage = app.querySelector('[data-stage]') as HTMLElement;
 const canvas = app.querySelector('canvas') as HTMLCanvasElement;
@@ -103,71 +103,74 @@ function showEditor(): void {
 }
 
 function showHostSetup(): void {
-  ui.showSetup('HOST GAME', (d) => {
+  ui.showCreateRoom((d) => {
     if (d.back) { showMenu(); return; }
-    // Combined host serves the web UI + WS on one port: connect back to the
-    // same origin the page was served from (covers custom --port). Fall back
-    // to hostname:8080 for vite-dev pages.
-    const addr = lanWsHint();
-    void startOnline(`ws://${addr}`, d.name);
-    // Connect straight to the real waiting lobby (roster comes from the
-    // server). The browser cannot inject a file into the node server process:
-    // a staged custom map still needs the CLI flag — remind via toast after
-    // the lobby opens (see startOnline).
-    try {
-      const staged = localStorage.getItem('sf_host_custom_name');
-      if (staged && localStorage.getItem('sf_host_custom')) {
-        setTimeout(() => ui.toast(`Custom map staged — run \`npm run host -- --level-file ${staged}\``), 600);
-      }
-    } catch {
-      /* storage unavailable — no hint */
-    }
-    void startOnline(`ws://${addr}`, d.name);
+    void startOnline(d.serverUrl, d.name, {
+      mode: 'create',
+      wins: d.wins,
+      bots: d.bots ? 1 : 0,
+      levelId: d.levelId,
+      ...(d.levelJson ? { levelJson: d.levelJson } : {}),
+    });
   });
 }
 
 function showJoinSetup(): void {
-  ui.showSetup('JOIN GAME', (d) => {
+  ui.showJoinRoom((d) => {
     if (d.back) { showMenu(); return; }
-    // Screens.ts already validates + normalizes to a ws:// URL; re-normalize
-    // defensively so bare IPs still work.
-    const url = /^wss?:\/\//i.test(d.ip) ? d.ip : normalizeWsUrl(d.ip);
-    if (!url) { ui.toast('Enter a valid address, e.g. ws://192.168.1.10:8080'); return; }
-    void startOnline(url, d.name);
-  }, { ip: true, startLabel: 'CONNECT' });
+    void startOnline(d.serverUrl, d.name, { mode: 'join', code: d.code });
+  });
 }
 
 /** Map low-level NetClient connect failures to actionable toasts. */
 function connectErrorToast(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err ?? '');
-  if (/server full/i.test(raw)) return 'Server is full (max 4 players) — try again later';
+  if (/room full/i.test(raw)) return 'Room is full (max 4 players) — try another room';
+  if (/room not found|bad room code|bad code/i.test(raw)) return 'Room not found — check the 4-letter code';
+  if (/server full|max rooms/i.test(raw)) return 'Server is full (max rooms) — try again later';
   if (/protocol mismatch|version mismatch/i.test(raw)) return 'Version mismatch — update the game and retry';
   if (/no hello/i.test(raw)) return 'Server did not respond — is `npm run host` running?';
+  if (/host left|room deleted|room closed/i.test(raw)) return raw.slice(0, 90);
   if (/refused|failed|timed out|timeout|websocket error|not respond|could not connect|no welcome/i.test(raw)) {
-    return 'Could not connect — is the server running? (`npm run host`)';
+    return 'Could not connect — is the room server running? (`npm run host`)';
   }
-  return raw ? `Could not connect — ${raw.slice(0, 90)}` : 'Could not connect — is the server running? (`npm run host`)';
+  return raw ? `Could not connect — ${raw.slice(0, 90)}` : 'Could not connect — is the room server running? (`npm run host`)';
 }
 
 // OnlineMode is lazy-loaded so the local game stays in its own chunk.
-// API: new OnlineMode(canvas, url, name), async start(), stop().
-// CONNECT lands in a waiting lobby (live roster from the server) and only
-// switches to the game HUD once the server starts the match — never an
-// instant bot game.
-async function startOnline(url: string, name: string): Promise<void> {
+// Room flow: create (host) or join (code) -> waiting lobby with room code ->
+// game HUD once the server starts the match. Host DELETE kicks everyone;
+// host quit auto-deletes the room.
+async function startOnline(
+  url: string,
+  name: string,
+  room: { mode: 'create'; wins?: number; bots?: number; levelId?: string; levelJson?: string } | { mode: 'join'; code: string },
+): Promise<void> {
   stopMode();
   ui.clear();
-  ui.toast(`Connecting to ${url} …`);
+  ui.toast(room.mode === 'create' ? `Creating room on ${url} …` : `Joining room ${room.code} …`);
   try {
     const { OnlineMode } = await import('./modes/OnlineMode.js');
-    const m = new OnlineMode(canvas, url, name);
+    const m = new OnlineMode(canvas, url, name, room);
     mode = m;
     let inLobby = true;
+    let inGame = false;
+    // Guards menu transitions so roomClosed + socket close only navigate once.
+    let settled = false;
+    const goMenu = (toast?: string): void => {
+      if (settled) return;
+      settled = true;
+      inLobby = false;
+      inGame = false;
+      stopMode();
+      if (toast) ui.toast(toast);
+      showMenu();
+    };
     type RosterEntry = { id: number; name: string; slot?: number; bot: boolean; color?: string };
-    // Recompute lobby view-model from the server roster: every player with
-    // a YOU tag for the local client.
+    // Recompute lobby view-model from the server roster: YOU + HOST badges.
     const refreshLobby = (roster: RosterEntry[]): void => {
       const myId = m.myId;
+      const hostId = m.hostId;
       ui.updateLobby(
         roster.map((p, i) => ({
           name: p.name,
@@ -176,6 +179,7 @@ async function startOnline(url: string, name: string): Promise<void> {
           id: p.id,
           slot: p.slot,
           isSelf: p.id === myId,
+          isHost: p.id === hostId,
         })),
       );
     };
@@ -190,21 +194,48 @@ async function startOnline(url: string, name: string): Promise<void> {
       });
       quitBtn.classList.remove('hidden');
     };
-    ui.showLobby(
-      {
-        title: 'LOBBY — ONLINE',
-        addr: url,
-        players: [],
-        hint: 'match starts automatically once 2+ players have joined',
-      },
-      {
-        onLeave: () => {
-          inLobby = false;
-          stopMode();
-          showMenu();
+    const showLobbyNow = (): void => {
+      const roster = (m.lobbyRoster ?? []) as RosterEntry[];
+      const myId = m.myId;
+      const hostId = m.hostId;
+      ui.showLobby(
+        {
+          title: m.isHost ? 'LOBBY — YOUR ROOM' : 'LOBBY — ONLINE',
+          code: m.roomCode,
+          addr: url,
+          players: roster.map((p, i) => ({
+            name: p.name,
+            color: p.color ?? PLAYER_COLORS[(p.slot ?? i) % PLAYER_COLORS.length],
+            bot: !!p.bot,
+            id: p.id,
+            slot: p.slot,
+            isSelf: p.id === myId,
+            isHost: p.id === hostId,
+          })),
+          isHost: m.isHost,
+          hint: m.isHost
+            ? 'share the code above — match starts automatically once 2+ players have joined'
+            : 'match starts automatically once 2+ players have joined',
         },
-      },
-    );
+        {
+          onLeave: () => {
+            inLobby = false;
+            stopMode();
+            settled = true;
+            showMenu();
+          },
+          onDelete: () => {
+            try {
+              m.deleteRoom();
+            } catch {
+              /* already closing */
+            }
+            ui.toast('Room deleted');
+            // Server roomClosed + close will also fire — goMenu guards double nav.
+          },
+        },
+      );
+    };
     m.onLobbyRoster = (roster) => {
       if (!inLobby) return;
       try {
@@ -216,24 +247,32 @@ async function startOnline(url: string, name: string): Promise<void> {
     m.onLobbyStart = () => {
       if (!inLobby) return;
       inLobby = false;
+      inGame = true;
       showGameHud();
       ui.toast('Match started!');
     };
     m.onLobbyClose = (err) => {
       if (!inLobby) return;
-      inLobby = false;
-      stopMode();
-      ui.toast(err && /full|version|exhausted/i.test(err) ? err : 'Connection closed');
-      showMenu();
+      goMenu(err && /room|full|version|closed|deleted|left|lost|not found|bad code/i.test(err) ? err : 'Connection closed');
+    };
+    m.onRoomClosed = (reason) => {
+      // Kicked/deleted at any phase: lobby or mid-game both return to menu.
+      if (inLobby || inGame) goMenu(reason || 'Room closed');
+    };
+    m.onDisconnect = (err) => {
+      if (inGame) goMenu(err || 'Connection lost');
     };
     await m.start();
-    // start() resolves once the lobby connection is up (arena + loop boot
-    // later via beginGame when the server starts the match). Late joins to
-    // an already-running match fire onLobbyStart via the server's start
-    // catch-up (or first snapshot) — cover the sync edge just in case.
-    if (inLobby && m.hasStarted) {
+    // start() resolves once the room connection is up (welcome received).
+    // Show the lobby with the real room code (create learns it from server).
+    // Late joins to a running match skip the lobby and go straight to HUD.
+    if (settled) return;
+    if (m.hasStarted) {
       inLobby = false;
+      inGame = true;
       showGameHud();
+    } else {
+      showLobbyNow();
     }
   } catch (err) {
     console.error(err);

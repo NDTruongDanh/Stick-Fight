@@ -17,17 +17,26 @@ npm run typecheck
 npm run build
 ```
 
-## LAN multiplayer
+## LAN multiplayer (rooms)
 
-One command hosts both the web UI and the game server on port 8080
-(rebuilds the client first so friends always get the latest UI):
+One command runs the room server — web UI + game server on port 8080
+(rebuilds the client first so friends always get the latest UI).
+It can run on ANY machine on the LAN, not necessarily the host's:
 
 ```sh
-npm run host          # open http://<host-ip>:8080 in a browser
+npm run host          # open http://<server-ip>:8080 in a browser
 ```
 
-Then click **HOST** (on the host) or **JOIN** with `ws://<host-ip>:8080`.
-Everyone must be on the same network.
+Anyone can then host a match from their own browser:
+
+1. Click **HOST** → pick a name, arena, wins, bots (optional custom map
+   upload) → **CREATE ROOM**. You get a short 4-letter room code.
+2. Friends click **JOIN** → enter the same server address
+   (`ws://<server-ip>:8080`) + the room code → **JOIN ROOM**.
+
+Everyone must be on the same network. Each room is an independent match
+(max 4 fighters). The room host can **DELETE ROOM** (everyone is kicked
+out); if the host quits/disconnects the room is auto-deleted.
 
 Fast restart without rebuilding the client:
 
@@ -36,9 +45,10 @@ npm run host:quick   # serve dist/ + WS as-is
 npm run host:ws-only # WS game server only, no web UI (old behavior)
 ```
 
-Match config: the menu has a round-wins stepper (3 / 5 / 10, default 5,
-persisted to `localStorage` key `sf_wins`). First to the target takes the
-match. Every 5th round is a boss round.
+Match config: the create-room screen has a round-wins picker (3 / 5 / 10,
+default 5) plus arena + bots. First to the target takes the match. Every
+5th round is a boss round. A custom editor JSON uploaded while creating a
+room is sent to the server with the room — joiners receive it automatically.
 
 ### Host flags
 
@@ -49,18 +59,20 @@ npm run host -- --port 8080 --level woods1 --wins 5 --bots 1
 | Flag           | Default | Description                                    |
 | -------------- | ------- | ---------------------------------------------- |
 | `--port`       | `8080`  | Port serving the web UI + WS game server       |
-| `--level`      | `woods1`| Starting arena id                              |
-| `--wins`       | `5`     | Round wins needed to take the match            |
-| `--bots`       | `0`     | Prefilled bot fighters (clamped to max 4 total; `Match` still tops up to a minimum of 2 fighters) |
+| `--level`      | `woods1`| Default starting arena for new rooms           |
+| `--wins`       | `5`     | Default round wins needed to take the match    |
+| `--bots`       | `0`     | Default prefilled bot fighters (clamped to max 4 total; `Match` still tops up to a minimum of 2 fighters) |
 | `--no-static`  | off     | Serve the WS game server only (no web UI)      |
 | `--static-dir` | `dist`  | Directory to serve the web UI from             |
 
-`--flag value` and `--flag=value` forms both work. Extra bots are trimmed
-as humans join so humans + bots never exceed 4 fighters.
+`--flag value` and `--flag=value` forms both work. `--level` / `--wins` /
+`--bots` are only room *defaults* — the creating client can override them
+per room. Extra bots are trimmed as humans join so humans + bots never
+exceed 4 fighters.
 
 ### Docker LAN host
 
-The image builds the web client and serves it together with the host
+The image builds the web client and serves it together with the room
 server on `:8080` — one port for everything.
 
 ```sh
@@ -69,22 +81,26 @@ npm run docker:host
 # or: docker compose up
 ```
 
-Friends open `http://<host-ip>:8080` and JOIN `ws://<host-ip>:8080`
-(the HOST button fills this in automatically).
+Friends open `http://<server-ip>:8080`, then HOST creates a room and
+shares the code, or JOIN with `ws://<server-ip>:8080` + the room code
+(the server address fields fill this in automatically).
 
 Firewall note: allow inbound TCP on `8080` (web UI + game server) on the
-host machine — Windows Defender Firewall (and any third-party firewall)
+server machine — Windows Defender Firewall (and any third-party firewall)
 must allow it for the current network profile.
 
 ### Troubleshooting
 
-- **Port in use** (`EADDRINUSE` on 8080): another host is already running —
+- **Port in use** (`EADDRINUSE` on 8080): another server is already running —
   stop it, or pick a free port: `npm run host -- --port 8081` (compose maps
   `8080:8080`, so adjust the mapping for Docker).
 - **Friends can't connect**: confirm everyone is on the same network
   (same Wi-Fi / SSID, no guest isolation or client-AP isolation on the
-  router), the join URL uses the host's LAN IP (not `localhost`), and the
-  firewall rules above are in place. `ping <host-ip>` is a quick check.
+  router), the server address uses the server's LAN IP (not `localhost`), and the
+  firewall rules above are in place. `ping <server-ip>` is a quick check.
+- **Room not found (bad code)**: the code is 4 letters, case-insensitive —
+  re-check it with the host. If the host quit, the room was auto-deleted
+  and a new one must be created.
 
 ## Controls
 
@@ -140,8 +156,9 @@ Click **LEVEL EDITOR** on the menu to paste or edit level JSON, then
 - Match config on the menu: local humans stepper, bots toggle, round-wins
   target (3 / 5 / 10, persisted) with a live arena-count preview
 - Arcade HUD: win stars, alive dots, ammo, killfeed, round banners
-- Online LAN mode: authoritative 60 Hz server, client prediction + snapshots,
-  host/join lobby flow, ping display
+- Online LAN rooms: authoritative 60 Hz room server, client prediction +
+  snapshots, create/join-by-code lobby flow, host delete + host-quit
+  auto-delete, ping display
 - Keyboard bots with seek / aim / jump / block behavior
 - Minimal level editor (menu → LEVEL EDITOR): JSON validate / save / clear,
   custom map plays first in the local rotation, shareable via copy-paste

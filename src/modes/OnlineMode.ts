@@ -79,6 +79,10 @@ interface KeyState {
   fire: boolean; block: boolean; throwReq: boolean;
 }
 
+export type RoomIntent =
+  | { mode: "create"; wins?: number; bots?: number; levelId?: string; levelJson?: string }
+  | { mode: "join"; code: string };
+
 export class OnlineMode {
   private net = new NetClient();
   private predictor = new Predictor();
@@ -89,7 +93,7 @@ export class OnlineMode {
   private seq = 0;
   private level: LevelDef = FALLBACK_LEVEL;
   private started = false;
-  /** True when the arena came from the host's custom JSON (LAN --level-file). */
+  /** True when the arena came from the room host's custom JSON upload. */
   private isCustom = false;
   private lastCustomJson: string | null = null;
   private snaps: { msg: SnapshotMsg; at: number }[] = [];
@@ -107,6 +111,10 @@ export class OnlineMode {
   onLobbyRoster: (players: RosterPlayer[]) => void = () => {};
   onLobbyStart: () => void = () => {};
   onLobbyClose: (err: string | null) => void = () => {};
+  /** Room was deleted/kicked at any phase (host delete / host quit). */
+  onRoomClosed: (reason: string) => void = () => {};
+  /** Connection dropped mid-game (no auto-reconnect in room mode). */
+  onDisconnect: (err: string | null) => void = () => {};
   private lastFrame = 0;
   private closed = false;
   private gameBooted = false;
@@ -127,6 +135,7 @@ export class OnlineMode {
     private canvas: HTMLCanvasElement,
     private url: string,
     private name: string,
+    private room: RoomIntent,
   ) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d context");
@@ -144,6 +153,23 @@ export class OnlineMode {
 
   get myId(): number {
     return this.net.clientId;
+  }
+
+  get roomCode(): string {
+    return this.net.roomCode;
+  }
+
+  get isHost(): boolean {
+    return this.net.isHost;
+  }
+
+  get hostId(): number {
+    return this.net.hostId;
+  }
+
+  /** Host-only: delete the room (kicks everyone). */
+  deleteRoom(): void {
+    this.net.deleteRoom();
   }
 
   private fireLobbyStart(): void {
@@ -202,33 +228,58 @@ export class OnlineMode {
         /* listener error — roster still cached */
       }
     };
-    this.net.onClose = () => {
-      const err = this.net.lastError;
-      // Fatal rejects (full/version) carry the server reason — surface it
-      // via the existing feed path instead of the generic retry line.
-      if (err && /full|version|exhausted/i.test(err)) {
-        this.pushFeed(err);
-        if (!this.started) {
-          try {
-            this.onLobbyClose(err);
-          } catch {
-            /* ignore listener errors */
-          }
+    this.net.onRoomClosed = (reason) => {
+      this.pushFeed(reason);
+      if (!this.started) {
+        try {
+          this.onLobbyClose(reason);
+        } catch {
+          /* ignore listener errors */
         }
-      } else {
-        // Auto-reconnect (up to 5x, backoff) is handled inside NetClient.
-        this.pushFeed("connection lost — retrying…");
+      }
+      try {
+        this.onRoomClosed(reason);
+      } catch {
+        /* ignore listener errors */
       }
     };
-    this.net.onReconnect = (attempt) => {
-      this.pushFeed(`reconnecting… (attempt ${attempt})`);
+    this.net.onClose = () => {
+      if (this.closed) return;
+      const err = this.net.lastError;
+      // Room mode has no auto-reconnect: any drop returns to the menu.
+      // Lobby-phase drops go through onLobbyClose; in-game drops through
+      // onDisconnect. RoomClosed is already surfaced via onRoomClosed above
+      // (onClose still fires when the socket closes right after).
+      if (!this.started) {
+        try {
+          this.onLobbyClose(err);
+        } catch {
+          /* ignore listener errors */
+        }
+      } else {
+        this.pushFeed(err ?? "connection lost");
+        try {
+          this.onDisconnect(err);
+        } catch {
+          /* ignore listener errors */
+        }
+      }
     };
     this.net.onMatchEnd = (wins) => {
       const best = Object.entries(wins).sort((a, b) => b[1] - a[1])[0];
       this.pushFeed(best ? `match won by #${best[0]} (${best[1]})` : "match over");
     };
 
-    await this.net.connect(this.url, this.name);
+    if (this.room.mode === "create") {
+      await this.net.createRoom(this.url, this.name, {
+        wins: this.room.wins,
+        bots: this.room.bots,
+        levelId: this.room.levelId,
+        ...(this.room.levelJson ? { levelJson: this.room.levelJson } : {}),
+      });
+    } else {
+      await this.net.joinRoom(this.url, this.room.code, this.name);
+    }
     // Lobby hold: return after connect. No level resolve, no canvas sizing,
     // no input/render loop — the caller keeps the DOM lobby menu up until
     // onLobbyStart fires, at which point beginGame() has already booted.
@@ -294,7 +345,7 @@ export class OnlineMode {
   }
 
   /**
-   * Adopt a host-provided custom level (LAN --level-file). Validates with the
+   * Adopt a room-host-provided custom level (uploaded with createRoom). Validates with the
    * editor's full validator; returns true when the custom level is active.
    * Skips re-parsing when the JSON is unchanged (snapshots repeat it).
    */
@@ -1101,7 +1152,7 @@ export class OnlineMode {
     void dpr;
     if (!snap) {
       const err = this.net.lastError;
-      if (err && /full|version|exhausted/i.test(err)) {
+      if (err && /full|version|exhausted|room|bad code|not found|closed|deleted|lost/i.test(err)) {
         ctx.fillStyle = "#f87171";
         ctx.fillText(err.slice(0, 42), 18, 34);
       } else {
@@ -1111,10 +1162,6 @@ export class OnlineMode {
       if (this.roster.length && !this.started) {
         ctx.fillStyle = "#fff";
         ctx.fillText(`lobby ${this.roster.length}/4 · waiting for players…`, 18, 52);
-      }
-      if (!this.started && this.net.reconnectAttempts > 0) {
-        ctx.fillStyle = "#facc15";
-        ctx.fillText(`reconnecting… (attempt ${this.net.reconnectAttempts})`, 18, 68);
       }
       return;
     }
@@ -1154,7 +1201,7 @@ export class OnlineMode {
     if (!this.started) {
       const total = this.roster.length;
       const err = this.net.lastError;
-      const fatal = err && /full|version|exhausted/i.test(err) ? err : null;
+      const fatal = err && /full|version|exhausted|room|bad code|not found|closed|deleted|lost/i.test(err) ? err : null;
       ctx.fillStyle = "rgba(0,0,0,0.6)";
       ctx.fillRect(cw / 2 - 220, ch / 2 - 42, 440, fatal ? 96 : 76);
       ctx.textAlign = "center";
