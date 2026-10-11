@@ -19,18 +19,22 @@ npm run build
 
 ## LAN multiplayer
 
-1. On the host machine, start the game server:
-   ```sh
-   npm run host          # serves ws://<host-ip>:8080
-   ```
-2. On the host machine (or any LAN machine), open the web client:
-   ```
-   http://<host-ip>:5173
-   ```
-3. Click **HOST** (on the host) or **JOIN** and enter `ws://<host-ip>:8080`
-   (JOIN screen: just the IP, e.g. `192.168.1.10`).
+One command hosts both the web UI and the game server on port 8080
+(rebuilds the client first so friends always get the latest UI):
 
+```sh
+npm run host          # open http://<host-ip>:8080 in a browser
+```
+
+Then click **HOST** (on the host) or **JOIN** with `ws://<host-ip>:8080`.
 Everyone must be on the same network.
+
+Fast restart without rebuilding the client:
+
+```sh
+npm run host:quick   # serve dist/ + WS as-is
+npm run host:ws-only # WS game server only, no web UI (old behavior)
+```
 
 Match config: the menu has a round-wins stepper (3 / 5 / 10, default 5,
 persisted to `localStorage` key `sf_wins`). First to the target takes the
@@ -42,20 +46,22 @@ match. Every 5th round is a boss round.
 npm run host -- --port 8080 --level woods1 --wins 5 --bots 1
 ```
 
-| Flag      | Default | Description                                    |
-| --------- | ------- | ---------------------------------------------- |
-| `--port`  | `8080`  | WS port the host server listens on             |
-| `--level` | `woods1`| Starting arena id                              |
-| `--wins`  | `5`     | Round wins needed to take the match            |
-| `--bots`  | `0`     | Prefilled bot fighters (clamped to max 4 total; `Match` still tops up to a minimum of 2 fighters) |
+| Flag           | Default | Description                                    |
+| -------------- | ------- | ---------------------------------------------- |
+| `--port`       | `8080`  | Port serving the web UI + WS game server       |
+| `--level`      | `woods1`| Starting arena id                              |
+| `--wins`       | `5`     | Round wins needed to take the match            |
+| `--bots`       | `0`     | Prefilled bot fighters (clamped to max 4 total; `Match` still tops up to a minimum of 2 fighters) |
+| `--no-static`  | off     | Serve the WS game server only (no web UI)      |
+| `--static-dir` | `dist`  | Directory to serve the web UI from             |
 
 `--flag value` and `--flag=value` forms both work. Extra bots are trimmed
 as humans join so humans + bots never exceed 4 fighters.
 
 ### Docker LAN host
 
-The image builds the web client and runs the host server on `:8080`.
-The client (`dist/`) is served separately.
+The image builds the web client and serves it together with the host
+server on `:8080` — one port for everything.
 
 ```sh
 npm run docker:build
@@ -63,18 +69,12 @@ npm run docker:host
 # or: docker compose up
 ```
 
-Then serve the client on the host machine (or any static host):
+Friends open `http://<host-ip>:8080` and JOIN `ws://<host-ip>:8080`
+(the HOST button fills this in automatically).
 
-```sh
-npm run build
-npm run preview -- --host   # serves dist/ on :4173, LAN-reachable
-```
-
-Friends open `http://<host-ip>:4173` and JOIN `ws://<host-ip>:8080`.
-
-Firewall note: allow inbound TCP on `8080` (game server) and `4173`
-(client preview) on the host machine — Windows Defender Firewall (and any
-third-party firewall) must allow them for the current network profile.
+Firewall note: allow inbound TCP on `8080` (web UI + game server) on the
+host machine — Windows Defender Firewall (and any third-party firewall)
+must allow it for the current network profile.
 
 ### Troubleshooting
 

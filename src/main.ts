@@ -1,5 +1,5 @@
 import './styles.css';
-import { Ui, getWinsTarget, normalizeWsUrl } from './ui/screens.js';
+import { Ui, getWinsTarget, lanWsHint, normalizeWsUrl } from './ui/screens.js';
 import type { HudState } from './ui/hud.js';
 import type { LevelDef } from '../shared/types.js';
 import { blankLevel, exportLevel, loadCustom } from './levels/editor.js';
@@ -20,7 +20,6 @@ if (!app) throw new Error('#app missing');
 
 // Stage: canvas (fixed 1280x720 buffer) scaled to fit + overlay for UI.
 app.className = 'fixed inset-0 bg-neutral-950 flex flex-col items-center justify-center overflow-hidden gap-1';
-const lanHost = window.location.hostname || 'localhost';
 app.innerHTML = `
   <div data-stage class="relative shrink-0">
     <canvas width="${W}" height="${H}" class="block bg-black rounded-sm shadow-[0_0_80px_rgba(220,38,38,0.25)] aspect-video max-w-full" style="image-rendering:auto;"></canvas>
@@ -30,7 +29,7 @@ app.innerHTML = `
   <div data-footer class="text-center text-[11px] text-neutral-500 select-none">
     <span class="text-neutral-400">WASD move · mouse aim · LMB fire · RMB block · F throw · H help · R rematch · Esc pause · Q quit</span>
     <span class="mx-2 text-neutral-700">|</span>
-    <span>LAN: host <span class="font-mono text-green-400">npm run host</span> then join <span class="font-mono text-green-300">ws://${lanHost}:8080</span></span>
+    <span>LAN: host <span class="font-mono text-green-400">npm run host</span> then join <span class="font-mono text-green-300">ws://${lanWsHint()}</span></span>
   </div>`;
 const stage = app.querySelector('[data-stage]') as HTMLElement;
 const canvas = app.querySelector('canvas') as HTMLCanvasElement;
@@ -106,8 +105,11 @@ function showEditor(): void {
 function showHostSetup(): void {
   ui.showSetup('HOST GAME', (d) => {
     if (d.back) { showMenu(); return; }
-    const host = window.location.hostname || 'localhost';
-    const addr = `${host}:8080`;
+    // Combined host serves the web UI + WS on one port: connect back to the
+    // same origin the page was served from (covers custom --port). Fall back
+    // to hostname:8080 for vite-dev pages.
+    const addr = lanWsHint();
+    void startOnline(`ws://${addr}`, d.name);
     // Connect straight to the real waiting lobby (roster comes from the
     // server). The browser cannot inject a file into the node server process:
     // a staged custom map still needs the CLI flag — remind via toast after

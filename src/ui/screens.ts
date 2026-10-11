@@ -78,6 +78,28 @@ function lanHint(): string {
   return host || 'localhost';
 }
 
+/**
+ * Port hint for the game server. When the page itself was served by the
+ * combined host (`npm run host`, any --port), the page's own port IS the
+ * game port — use it so custom ports work with zero config. Vite dev
+ * (:5173) and `vite preview` (:4173) are client-only ports, so fall back
+ * to the default game port there.
+ */
+function lanPort(): string {
+  try {
+    const p = typeof window !== 'undefined' ? window.location?.port : '';
+    if (p && /^\d+$/.test(p) && p !== '5173' && p !== '4173') return p;
+  } catch {
+    /* non-browser — fall through */
+  }
+  return '8080';
+}
+
+/** `host:port` hint for the game server (dynamic port, see lanPort). */
+export function lanWsHint(): string {
+  return `${lanHint()}:${lanPort()}`;
+}
+
 export interface LobbyPlayer {
   name: string;
   color: string;
@@ -238,7 +260,7 @@ function footerHTML(): string {
   } catch {
     host = '';
   }
-  const ipHint = host ? ` · LAN: friends join <span class="font-mono text-green-300">ws://${esc(host)}:8080</span>` : '';
+  const ipHint = host ? ` · LAN: friends join <span class="font-mono text-green-300">ws://${esc(lanWsHint())}</span>` : '';
   return `<p class="text-center text-[11px] text-neutral-500 mt-4">clone for LAN parties · <span data-wins-note>first to ${getWinsTarget()} wins takes the match</span>${ipHint}</p>
     <p class="text-center text-[11px] text-neutral-600 mt-1">press <span class="font-mono text-neutral-400">H</span> in-game to toggle this help</p>`;
 }
@@ -348,7 +370,7 @@ export class Ui {
         ${
           opts.ip
             ? `<label class="text-sm text-neutral-300">Host address
-                 <input id="s-ip" class="${INPUT} mt-1 font-mono" placeholder="ws://${lanHint()}:8080" />
+                 <input id="s-ip" class="${INPUT} mt-1 font-mono" placeholder="ws://${lanWsHint()}" />
                  <span class="block text-[11px] text-neutral-500 mt-1">examples: <span class="font-mono text-neutral-300">ws://192.168.1.10:8080</span> · <span class="font-mono text-neutral-300">192.168.1.10:8080</span> · <span class="font-mono text-neutral-300">192.168.1.10</span> (port 8080)</span>
                  <span id="s-ip-err" class="hidden block text-[12px] text-red-400 mt-1"></span>
                </label>`
@@ -357,7 +379,7 @@ export class Ui {
         ${
           !opts.ip && !opts.local
             ? `<div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">
-                 Friends join at <span class="font-mono text-green-300">ws://${esc(lanHint())}:8080</span><br />
+                 Friends join at <span class="font-mono text-green-300">ws://${esc(lanWsHint())}</span><br />
                  <span class="text-neutral-400">On the host PC first run <span class="font-mono text-green-300">npm run host</span>, then press START below.</span>
                </div>
                <div class="rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-[12px] text-neutral-300">

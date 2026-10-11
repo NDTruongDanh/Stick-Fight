@@ -1,4 +1,5 @@
 import { WebSocket, WebSocketServer } from "ws";
+import type { Server as HttpServer } from "node:http";
 import { Match, emptyInput } from "./Match.js";
 import type { MatchInput } from "./Match.js";
 import { LEVELS } from "../src/levels/levels.js";
@@ -70,7 +71,7 @@ export class HostServer {
     this.addInitialBots(botCount);
   }
 
-  start(): void {
+  start(httpServer?: HttpServer): void {
     // Upgrade to the real level pack if another module provides it (non-blocking).
     // Skipped for custom levels: the JSON def is already authoritative.
     if (!this.customJson) {
@@ -81,7 +82,11 @@ export class HostServer {
       });
     }
 
-    this.wss = new WebSocketServer({ port: this.port });
+    // Combined host: attach to the shared HTTP server (static client + WS on
+    // one port) when provided; otherwise listen standalone (tests, tooling).
+    this.wss = httpServer
+      ? new WebSocketServer({ server: httpServer })
+      : new WebSocketServer({ port: this.port });
     this.wss.on("connection", (ws) => this.onConnect(ws));
     this.wss.on("error", (err) => console.error("[host] ws error:", err));
 
@@ -97,7 +102,11 @@ export class HostServer {
         this.pumpSim(dt);
       }, TICK_WAKE_MS),
     );
-    console.log(`[host] listening on port ${this.port} (tick ${this.tickHz}Hz, snap ${SNAP_RATE}Hz)`);
+    console.log(
+      httpServer
+        ? `[host] websocket attached (tick ${this.tickHz}Hz, snap ${SNAP_RATE}Hz)`
+        : `[host] listening on port ${this.port} (tick ${this.tickHz}Hz, snap ${SNAP_RATE}Hz)`,
+    );
   }
 
   /**
